@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B站实时数据监控</title>
+<script src="/vendor/echarts.min.js"></script>
+<script>if (typeof echarts === 'undefined') { document.write('<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.1/echarts.min.js"><\/script>'); }</script>
+<style>
+  :root {
+    --bg: #0b0f1a;
+    --panel: #121828;
+    --border: #1f2a40;
+    --text: #dbe4f3;
+    --muted: #7f92b2;
+    --pink: #fb7299;
+    --blue: #23ade5;
+    --green: #5ad8a6;
+    --orange: #f5a623;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
+    padding: 20px 24px 40px;
+  }
+  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
+  h1 { font-size: 22px; font-weight: 700; line-height: 1.3; }
+  h1 a { color: var(--text); text-decoration: none; }
+  h1 a:hover { color: var(--blue); }
+  .sub { color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.7; }
+  .sub a { color: var(--blue); text-decoration: none; }
+  .head-right { text-align: right; flex-shrink: 0; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); }
+  .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .badge.ok .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
+  .badge.err { color: #ff8f8f; border-color: #5a2733; }
+  .badge.err .dot { background: #ff5f5f; box-shadow: 0 0 6px #ff5f5f; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .card .label { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
+  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .card .foot { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 16px; }
+  .card .foot .up { color: var(--green); }
+  .card .ico { font-size: 15px; }
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .panel.wide { grid-column: 1 / -1; }
+  .panel h2 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .panel h2 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
+  .chart { height: 280px; }
+  .chart.tall { height: 320px; }
+  .analysis { font-size: 13.5px; line-height: 2.05; color: var(--text); }
+  .analysis b { color: var(--pink); font-variant-numeric: tabular-nums; }
+  .analysis .dim { color: var(--muted); }
+  .analysis .sec { color: var(--blue); font-weight: 600; }
+  footer { margin-top: 18px; color: var(--muted); font-size: 12px; text-align: center; }
+  #fatal { padding: 40px; text-align: center; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="head-left">
+    <h1><a id="v-title" href="#" target="_blank" rel="noopener">正在加载…</a></h1>
+    <div class="sub" id="v-meta">—</div>
+  </div>
+  <div class="head-right">
+    <div class="badge" id="status"><span class="dot"></span><span id="status-text">连接中…</span></div>
+    <div class="sub" id="updated">—</div>
+    <div class="sub" id="countdown">—</div>
+  </div>
+</header>
+
+<main>
+  <section class="cards" id="cards"></section>
+  <section class="grid">
+    <div class="panel wide"><h2>播放量增长 <small>本次监控期间</small></h2><div id="chart-view" class="chart tall"></div></div>
+    <div class="panel"><h2>实时在线人数 <small>各分P · “正在看”</small></h2><div id="chart-online" class="chart"></div></div>
+    <div class="panel"><h2>互动指标趋势 <small>点赞 / 投币 / 收藏 / 分享</small></h2><div id="chart-interact" class="chart"></div></div>
+    <div class="panel wide"><h2>每分钟增量 <small>相邻两次采集的折合速率</small></h2><div id="chart-delta" class="chart"></div></div>
+    <div class="panel"><h2>互动率 <small>占播放量比例</small></h2><div id="chart-ratio" class="chart"></div></div>
+    <div class="panel"><h2>分析结论</h2><div id="analysis" class="analysis">等待数据…</div></div>
+  </section>
+</main>
+
+<footer>数据来源：B站公开接口（只读） · 页面每 <span id="foot-interval">60</span> 秒自动刷新 · 采集通道 <span id="net-info">—</span> · 仅供学习参考</footer>
+<div id="fatal" style="display:none">ECharts 加载失败，请检查网络后刷新页面。</div>
+
+<script>
+if (typeof echarts === 'undefined') {
+  document.getElementById('fatal').style.display = 'block';
+} else {
+  main();
+}
+
+function main() {
+  const C = {
+    view: '#23ade5', like: '#fb7299', coin: '#f5a623', favorite: '#ffd044',
+    share: '#7ee0d2', danmaku: '#9d8cff', reply: '#6ec7ff', online: '#5ad8a6',
+    axis: '#8fa3c0', split: '#1a2438', line: '#2a3a55'
+  };
+  const charts = {};
+  let nextTickAt = 0;
+
+  function initCharts() {
+    ['chart-view', 'chart-online', 'chart-interact', 'chart-delta', 'chart-ratio'].forEach(id => {
+      charts[id] = echarts.init(document.getElementById(id));
+    });
+    window.addEventListener('resize', () => Object.values(charts).forEach(c => c.resize()));
+  }
+
+  const fmt = n => {
+    if (n === null || n === undefined || isNaN(Number(n))) return '—';
+    n = Number(n);
+    const abs = Math.abs(n);
+    if (abs >= 1e8) return (n / 1e8).toFixed(2) + '亿';
+    if (abs >= 1e4) return (n / 1e4).toFixed(1) + '万';
+    return String(Math.round(n));
+  };
+  const full = n => (n === null || n === undefined) ? '—' : Number(n).toLocaleString('zh-CN');
+  const pct = (a, b) => (a === null || !b) ? null : (a / b * 100);
+  const tstr = ts => new Date(ts * 1000).toTimeString().slice(0, 8);
+  const hmstr = ts => new Date(ts * 1000).toTimeString().slice(0, 5);
+  const durStr = s => {
+    if (!s && s !== 0) return '—';
+    const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+    return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(sec).padStart(2, '0');
+  };
+
+  const baseAxis = () => ({
+    axisLine: { lineStyle: { color: C.line } },
+    axisLabel: { color: C.axis },
+    axisTick: { show: false },
+    splitLine: { lineStyle: { color: C.split } }
+  });
+  const baseTooltip = trigger => ({
+    trigger,
+    backgroundColor: '#1a2236', borderColor: '#2a3a55',
+    textStyle: { color: '#dbe4f3', fontSize: 12 },
+    valueFormatter: v => full(v)
+  });
+
+  // 趋势图 Y 轴：数值范围窄时万进制会全部撞在同一档位，≥1万直接用完整数字
+  const preciseFmt = v => Math.abs(Number(v)) >= 1e4 ? Number(v).toLocaleString('zh-CN') : fmt(v);
+
+  function timeOption(series, legend) {
+    return {
+      animation: false,
+      backgroundColor: 'transparent',
+      grid: { left: 8, right: 16, top: legend ? 34 : 24, bottom: 4, containLabel: true },
+      legend: legend ? { textStyle: { color: C.axis, fontSize: 11 }, top: 2, icon: 'roundRect', itemWidth: 12, itemHeight: 6 } : undefined,
+      tooltip: Object.assign(baseTooltip('axis'), {
+        axisPointer: { type: 'line', lineStyle: { color: '#3a4c6e' } }
+      }),
+      xAxis: Object.assign(baseAxis(), { type: 'time', splitLine: { show: false },
+        axisLabel: { color: C.axis, formatter: { hour: '{HH}:{mm}', minute: '{HH}:{mm}', second: '{HH}:{mm}' } } }),
+      yAxis: Object.assign(baseAxis(), { type: 'value', scale: true,
+        axisLabel: { color: C.axis, formatter: v => preciseFmt(v) } }),
+      series
+    };
+  }
+
+  function lineSeries(name, data, color, extra) {
+    return Object.assign({
+      name, type: 'line', data, symbol: 'circle', symbolSize: 5,
+      connectNulls: true, lineStyle: { width: 2, color }, itemStyle: { color },
+      emphasis: { focus: 'series' }
+    }, extra || {});
+  }
+
+  function setStatus(kind, text) {
+    const el = document.getElementById('status');
+    el.className = 'badge ' + (kind === 'ok' ? 'ok' : 'err');
+    document.getElementById('status-text').textContent = text;
+  }
+
+  function renderCards(latest, first, keys) {
+    const defs = [
+      { k: 'view',     label: '播放量', ico: '▶' },
+      { k: 'like',     label: '点赞',   ico: '👍' },
+      { k: 'coin',     label: '投币',   ico: '🪙' },
+      { k: 'favorite', label: '收藏',   ico: '⭐' },
+      { k: 'share',    label: '分享',   ico: '↗' },
+      { k: 'danmaku',  label: '弹幕',   ico: '💬' },
+      { k: 'reply',    label: '评论',   ico: '✎' },
+      { k: 'online',   label: '正在看', ico: '👀', hint: 'P1 中文版实时' },
+    ];
+    const host = document.getElementById('cards');
+    host.innerHTML = defs.map(d => {
+      const v = latest[d.k];
+      const delta = (first && v !== null && first[d.k] !== null) ? v - first[d.k] : null;
+      const deltaHtml = delta !== null
+        ? `本次监控 <span class="up">${delta > 0 ? '+' : ''}${fmt(delta)}</span>${d.hint ? ` · ${d.hint}` : ''}`
+        : (d.hint ? `<span class="dim2">${d.hint}</span>` : '等待下一次采集');
+      return `<div class="card">
+        <div class="label"><span>${d.label}</span><span class="ico">${d.ico}</span></div>
+        <div class="value">${fmt(v)}</div>
+        <div class="foot" title="精确值 ${full(v)}">${deltaHtml}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderOnlineSeries(samples) {
+    // 按分P拆出各自在线人数序列
+    const parts = [];
+    samples.forEach(s => (s.online_pages || []).forEach(p => {
+      if (!parts.find(x => x.part === p.part)) parts.push({ part: p.part, cid: p.cid });
+    }));
+    const palette = ['#5ad8a6', '#23ade5', '#f5a623', '#9d8cff', '#fb7299'];
+    return parts.map((p, i) => lineSeries(p.part,
+      samples.map(s => {
+        const hit = (s.online_pages || []).find(x => x.cid === p.cid);
+        return hit && hit.total !== null ? [s.ts * 1000, hit.total] : [s.ts * 1000, null];
+      }), palette[i % palette.length]));
+  }
+
+  function renderAnalysis(latest, samples) {
+    const el = document.getElementById('analysis');
+    const s = latest;
+    if (!s || s.view) {} // noop
+    const v = s.view;
+    if (!v) { el.textContent = '暂无数据'; return; }
+    const rate = n => pct(n, v);
+    const rows = [
+      ['点赞率', s.like], ['投币率', s.coin], ['收藏率', s.favorite],
+      ['分享率', s.share], ['弹幕率', s.danmaku], ['评论率', s.reply],
+    ].map(([name, val]) => {
+      const r = rate(val);
+      return r === null ? '' : `<div>${name}：<b>${r.toFixed(2)}%</b><span class="dim">（每百播放 ${(val / v * 100).toFixed(2)}）</span></div>`;
+    }).join('');
+
+    const trio = (s.like || 0) + (s.coin || 0) + (s.favorite || 0);
+    const trioRate = pct(trio, v);
+    const likeCoin = s.coin ? (s.like / s.coin) : null;
+
+    let session = '';
+    const first = samples[0];
+    if (samples.length >= 2) {
+      const mins = (samples[samples.length - 1].ts - first.ts) / 60;
+      const dv = s.view - first.view;
+      const dl = (s.like || 0) - (first.like || 0);
+      const perHour = n => mins > 0.2 ? fmt(n / mins * 60) + ' /小时' : '采样时间过短';
+      const peakOnline = Math.max(...samples.map(x => x.online || 0).filter(x => x > 0).concat([0]));
+      session = `<div class="sec">· 本次监控（${tstr(first.ts)} 起，共 ${samples.length} 次采样，${mins.toFixed(0)} 分钟）</div>
+        <div>播放增长：<b>+${fmt(dv)}</b>（折合 ${perHour(dv)}），点赞增长：<b>+${fmt(dl)}</b></div>
+        <div>在线人数峰值：<b>${peakOnline}</b> 人，当前 ${s.online ?? '—'} 人</div>`;
+    }
+
+    el.innerHTML =
+      `<div class="sec">· 整体互动水平（基于累计播放 ${fmt(v)}）</div>${rows}
+       <div>三连率（赞+币+藏）：<b>${trioRate === null ? '—' : trioRate.toFixed(2) + '%'}</b>，赞/投币比：<b>${likeCoin ? likeCoin.toFixed(2) + ' : 1' : '—'}</b></div>${session}`;
+  }
+
+  function render(latestData, samples) {
+    const meta = latestData.meta;
+    const latest = latestData.latest;
+    if (!latest) { setStatus('err', '暂无数据，等待首次采集…'); return; }
+
+    // 顶部信息
+    const link = `https://www.bilibili.com/video/${meta.bvid}`;
+    const titleEl = document.getElementById('v-title');
+    titleEl.textContent = meta.title;
+    titleEl.href = link;
+    const pub = meta.pubdate ? new Date(meta.pubdate * 1000).toLocaleString('zh-CN', { hour12: false }) : '—';
+    document.getElementById('v-meta').innerHTML =
+      `UP主：${meta.owner}　·　发布于 ${pub}　·　时长 ${durStr(meta.duration)}　·　${meta.pages.length} 个分P：${meta.pages.map(p => p.part).join(' / ')}
+       <br>精确数据：<a href="${link}" target="_blank" rel="noopener">${link}</a>`;
+
+    if (latestData.error) {
+      setStatus('err', `采集异常：${latestData.error}`);
+    } else {
+      setStatus('ok', `正常 · 已采样 ${latestData.sample_count} 次`);
+    }
+    document.getElementById('updated').textContent = `最后更新：${tstr(latest.ts)}（服务器时间 ${tstr(latestData.server_time)}）`;
+    document.getElementById('foot-interval').textContent = latestData.interval;
+    nextTickAt = Date.now() + latestData.interval * 1000;
+
+    const net = latestData.net;
+    if (net) {
+      const parts = [];
+      parts.push(net.transport_active && net.transport_active !== '-'
+        ? net.transport_active : (net.transport_preferred || 'auto'));
+      if (net.proxy) {
+        parts.push(net.proxy.size > 1
+          ? `${net.proxy.current}（池${net.proxy.size}·轮换${net.proxy.rotations}次）`
+          : net.proxy.current);
+      }
+      const st = net.stats || {};
+      if (st.risk_events) parts.push(`风控拦截${st.risk_events}次`);
+      if (st.last_latency_ms) parts.push(st.last_latency_ms + 'ms');
+      document.getElementById('net-info').textContent = parts.join(' · ');
+    }
+
+    renderCards(latest, samples.length >= 1 ? samples[0] : null, null);
+
+    // 图表
+    const tsArr = samples.map(s => s.ts * 1000);
+    charts['chart-view'].setOption(timeOption([
+      lineSeries('播放量', samples.map(s => [s.ts * 1000, s.view]), C.view, {
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [{ offset: 0, color: 'rgba(35,173,229,0.35)' }, { offset: 1, color: 'rgba(35,173,229,0.02)' }] } }
+      })
+    ]), true);
+
+    charts['chart-online'].setOption(timeOption(renderOnlineSeries(samples), true), true);
+
+    charts['chart-interact'].setOption(timeOption([
+      lineSeries('点赞', samples.map(s => [s.ts * 1000, s.like]), C.like),
+      lineSeries('投币', samples.map(s => [s.ts * 1000, s.coin]), C.coin),
+      lineSeries('收藏', samples.map(s => [s.ts * 1000, s.favorite]), C.favorite),
+      lineSeries('分享', samples.map(s => [s.ts * 1000, s.share]), C.share),
+    ], true), true);
+
+    // 每分钟增量
+    const deltaSeries = [];
+    if (samples.length >= 2) {
+      const mk = key => {
+        const pts = [];
+        for (let i = 1; i < samples.length; i++) {
+          const a = samples[i - 1], b = samples[i];
+          if (a[key] === null || b[key] === null) continue;
+          const mins = Math.max((b.ts - a.ts) / 60, 1 / 60);
+          pts.push([b.ts * 1000, (b[key] - a[key]) / mins]);
+        }
+        return pts;
+      };
+      deltaSeries.push({ name: '播放/分钟', type: 'bar', data: mk('view'), barMaxWidth: 18, itemStyle: { color: C.view } });
+      deltaSeries.push(lineSeries('点赞/分钟', mk('like'), C.like));
+      deltaSeries.push(lineSeries('投币/分钟', mk('coin'), C.coin));
+    }
+    charts['chart-delta'].setOption(timeOption(deltaSeries, true), true);
+
+    // 互动率横条图
+    const ratioDefs = [
+      ['点赞率', latest.like, C.like], ['投币率', latest.coin, C.coin],
+      ['收藏率', latest.favorite, C.favorite], ['分享率', latest.share, C.share],
+      ['弹幕率', latest.danmaku, C.danmaku], ['评论率', latest.reply, C.reply],
+    ].map(([name, val, color]) => ({
+      name, value: pct(val, latest.view) === null ? null : Number(pct(val, latest.view).toFixed(3)),
+      itemStyle: { color }
+    })).filter(x => x.value !== null);
+    charts['chart-ratio'].setOption({
+      animation: false, backgroundColor: 'transparent',
+      grid: { left: 8, right: 60, top: 10, bottom: 4, containLabel: true },
+      tooltip: Object.assign(baseTooltip('item'), { valueFormatter: v => v + '%' }),
+      xAxis: Object.assign(baseAxis(), { type: 'value', splitLine: { lineStyle: { color: C.split } },
+        axisLabel: { color: C.axis, formatter: v => v + '%' } }),
+      yAxis: Object.assign(baseAxis(), { type: 'category', splitLine: { show: false },
+        data: ratioDefs.map(x => x.name).reverse(),
+        axisLabel: { color: C.axis, fontSize: 12 } }),
+      series: [{
+        type: 'bar', data: [...ratioDefs].reverse(), barMaxWidth: 16,
+        label: { show: true, position: 'right', color: C.axis, fontSize: 11, formatter: p => p.value + '%' }
+      }]
+    }, true);
+
+    renderAnalysis(latest, samples);
+  }
+
+  async function refresh() {
+    try {
+      const [latestData, history] = await Promise.all([
+        fetch('/api/latest').then(r => r.json()),
+        fetch('/api/history').then(r => r.json())
+      ]);
+      render(latestData, history.samples || []);
+    } catch (e) {
+      setStatus('err', '网络错误：' + e.message);
+    }
+  }
+
+  setInterval(() => {
+    const left = Math.max(0, Math.round((nextTickAt - Date.now()) / 1000));
+    document.getElementById('countdown').textContent = left > 0 ? `${left} 秒后自动刷新` : '正在刷新…';
+  }, 1000);
+
+  initCharts();
+  refresh();
+  setInterval(refresh, 60000);
+}
+</script>
+</body>
+</html>
