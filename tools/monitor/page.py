@@ -1,25 +1,20 @@
 # -*- coding: utf-8 -*-
-"""监控页：参数表单 + 启动/停止 + 内嵌 ECharts 仪表盘（WebEngine 不可用时
-回退系统浏览器打开）。"""
+"""监控页：参数表单 + 启动/停止；仪表盘在系统浏览器中打开。"""
 import re
 import webbrowser
 from pathlib import Path
 
 import qtawesome as qta
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QComboBox, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QPushButton, QSpinBox, QVBoxLayout,
                                QWidget)
 
-from app.env import WEBENGINE_AVAILABLE
 from app.widgets import LogPanel, PathRow, card, h1, h2, muted
 from core.config import COOKIE_FILE
 from core.output import app_base_dir
 
 from .server import MonitorServer
-
-if WEBENGINE_AVAILABLE:  # env.py 已保证在 QApplication 前完成模块级导入
-    from PySide6.QtWebEngineWidgets import QWebEngineView
 
 
 class MonitorPage(QWidget):
@@ -90,18 +85,10 @@ class MonitorPage(QWidget):
         root.addWidget(self.log_panel)
 
         root.addWidget(h2("仪表盘"), 0)
-        if WEBENGINE_AVAILABLE:
-            self.view = QWebEngineView(self)
-            self.view.hide()  # 启动前不显示（避免暗色主题下出现白色空块）
-            root.addWidget(self.view, 1)
-        else:
-            self.view = None
-        self.dash_placeholder = QLabel("启动监控后，仪表盘将在此显示"
-                                       + ("" if WEBENGINE_AVAILABLE
-                                          else "（本包未内嵌 WebEngine，请点「在浏览器打开」）"))
-        self.dash_placeholder.setObjectName("muted")
-        self.dash_placeholder.setAlignment(Qt.AlignCenter)
-        root.addWidget(self.dash_placeholder, 1)
+        self.dash_hint = muted("启动监控后将自动在系统浏览器中打开仪表盘；"
+                               "也可随时点击「在浏览器打开」再次打开。")
+        root.addWidget(self.dash_hint, 0, Qt.AlignHCenter)
+        root.addStretch(1)
 
     # ---------- 控制 ----------
 
@@ -128,10 +115,7 @@ class MonitorPage(QWidget):
         self.status_label.setText(f"运行中 · {url}")
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
-        if self.view is not None:
-            self.dash_placeholder.hide()
-            self.view.show()
-            self.view.load(QUrl(url))
+        webbrowser.open(url)
 
     def on_stop(self):
         if self.server is not None:

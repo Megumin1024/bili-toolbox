@@ -14,6 +14,7 @@ MonitorServer 生命周期：
        /api/history     全部历史样本
 """
 import json
+import re
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,10 +41,9 @@ CONTENT_TYPES = {
 
 
 def to_int(v):
-    try:
-        return int(str(v).strip())
-    except (TypeError, ValueError):
-        return None
+    """解析整数值；兼容 B站返回的 '1000+' 等区间字符串（取下界）。"""
+    m = re.match(r"\s*(\d+)", str(v))
+    return int(m.group(1)) if m else None
 
 
 class _State:

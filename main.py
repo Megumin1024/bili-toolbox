@@ -7,8 +7,6 @@ import sys
 import traceback
 from pathlib import Path
 
-import app.env  # noqa: F401  # QtWebEngine 必须先于 QApplication 导入
-
 
 def _asset(name):
     base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))

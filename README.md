@@ -53,8 +53,7 @@
 
 | 包 | 大小 | 说明 |
 |---|---|---|
-| `BiliToolbox-v*.zip` | ≈100MB | **推荐**。解压后双击 `B站工具箱.exe` 运行，监控仪表盘在浏览器中打开 |
-| 完整版（自行打包） | ≈400MB | 监控仪表盘内嵌应用窗口，见[自行打包](#%EF%B8%8F-自行打包) |
+| `BiliToolbox-v*.zip` | ≈45MB | 解压后双击 `B站工具箱.exe` 运行；监控仪表盘自动在系统浏览器中打开 |
 
 > 系统要求：Windows 10 / 11（64 位）
 
@@ -71,8 +70,7 @@ python main.py
 
 ```bash
 pip install pyinstaller
-pyinstaller build_toolbox.spec --noconfirm       # 精简版（约 100MB）
-pyinstaller build_toolbox_full.spec --noconfirm  # 完整版（内嵌仪表盘，约 400MB）
+pyinstaller build_toolbox.spec --noconfirm
 ```
 
 产物位于 `dist/`，为 onedir 目录，整体打包为 zip 即可分发。
@@ -83,7 +81,7 @@ pyinstaller build_toolbox_full.spec --noconfirm  # 完整版（内嵌仪表盘�
 
 **视频采集**：每行一个来源，支持视频链接 / BV / av 号、收藏夹 URL（`favlist?fid=`）、合集（`collectiondetail?sid=`）、系列（`seriesdetail?sid=`）与 `.txt` 列表文件。单次快照生成对比总表；定时追踪模式每轮输出增量并生成**增速榜**（播放 / 小时排序）。
 
-**实时监控**：输入 BV 号与采集间隔即可启动。完整版在窗口内直接显示仪表盘；精简版点击「在浏览器打开」。
+**实时监控**：输入 BV 号与采集间隔即可启动，仪表盘会自动在系统浏览器中打开（可点击「在浏览器打开」再次打开）。
 
 ## ⚙️ 设置
 
@@ -150,10 +148,10 @@ bili-toolbox/
 </details>
 
 <details>
-<summary><b>精简版和完整版的区别？</b></summary>
+<summary><b>监控仪表盘在哪里看？</b></summary>
 <br>
 
-仅监控页的仪表盘展示方式不同：精简版调用系统浏览器打开（体积约 100MB），完整版通过内嵌浏览器组件直接显示在窗口中（体积约 400MB）。功能完全一致。
+启动监控后会自动在系统浏览器中打开仪表盘页面（本地地址，端口随机）；之后可随时点击「在浏览器打开」重新打开，停止监控后页面不再刷新。
 
 </details>
 
