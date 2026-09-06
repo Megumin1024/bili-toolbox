@@ -35,14 +35,6 @@
 
 ![评论抓取](docs/screenshots/comments.png)
 
-**📊 视频采集**
-
-![视频采集](docs/screenshots/collector.png)
-
-**📡 实时监控（演示数据）**
-
-![实时监控](docs/screenshots/monitor.png)
-
 **📈 监控仪表盘 · 精确数据**
 
 ![监控仪表盘](docs/screenshots/dashboard.png)
