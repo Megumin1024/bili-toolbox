@@ -1,10 +1,20 @@
 # -*- coding: utf-8 -*-
-"""生成 README 截图（浅色主题 + 演示数据，无真实目标信息）。开发期工具。"""
+"""生成 README 截图（浅色主题 + 演示数据，无真实目标信息）。开发期工具。
+
+运行前设置环境变量 BILITOOLBOX_SHOT_BVID 为任意真实视频 BV 号（仅用于
+内部拉取数据，截图展示层会自动替换为演示文案）。
+"""
+import os
+import sys
 import time
 
 import app.env  # noqa: F401
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import QApplication, QMessageBox
+
+SHOT_BVID = os.environ.get("BILITOOLBOX_SHOT_BVID")
+if not SHOT_BVID:
+    raise SystemExit("请先设置 BILITOOLBOX_SHOT_BVID（任意真实视频 BV 号）")
 
 QMessageBox.information = staticmethod(lambda *a, **k: None)
 
@@ -77,7 +87,7 @@ def shoot_collector():
 def shoot_monitor():
     win.switch(2)
     p = win.pages[2]
-    p.bvid_edit.setText("BV1zi7Y6BEdS")          # 内部用真实 BV 拉取，展示层已去标识
+    p.bvid_edit.setText(SHOT_BVID)  # 内部用真实 BV 拉取，展示层已去标识
     p.interval_spin.setValue(5)
     p.data_row.set_value("D:\\BiliToolbox\\监控数据")
     p.on_start()

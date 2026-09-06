@@ -24,7 +24,6 @@ from core.proxy import ProxyPool
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
-DEFAULT_BVID = "BV1zi7Y6BEdS"
 MAX_SAMPLES = 50000  # 内存/加载上限，防止长期挂机无限膨胀
 
 VIEW_API = "https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
