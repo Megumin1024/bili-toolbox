@@ -43,6 +43,10 @@
 
 ![实时监控](docs/screenshots/monitor.png)
 
+**📈 监控仪表盘 · 精确数据**
+
+![监控仪表盘](docs/screenshots/dashboard.png)
+
 ## 📥 下载
 
 前往 [**Releases**](https://github.com/Megumin1024/bili-toolbox/releases) 下载免安装版本：
