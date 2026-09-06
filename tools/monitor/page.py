@@ -87,7 +87,8 @@ class MonitorPage(QWidget):
         root.addWidget(h2("仪表盘"), 0)
         self.dash_hint = muted("启动监控后将自动在系统浏览器中打开仪表盘；"
                                "也可随时点击「在浏览器打开」再次打开。")
-        root.addWidget(self.dash_hint, 0, Qt.AlignHCenter)
+        self.dash_hint.setAlignment(Qt.AlignCenter)
+        root.addWidget(self.dash_hint)
         root.addStretch(1)
 
     # ---------- 控制 ----------
