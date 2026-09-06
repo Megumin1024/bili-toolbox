@@ -44,7 +44,7 @@ class MonitorPage(QWidget):
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(10)
         self.bvid_edit = QLineEdit()
-        self.bvid_edit.setPlaceholderText("BV1zi7Y6BEdS")
+        self.bvid_edit.setPlaceholderText("示例：BV1xxxxxxxxx")
         form.addRow("视频 BV 号", self.bvid_edit)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 3600)

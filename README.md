@@ -31,13 +31,17 @@
 
 ## 📸 截图
 
-| 评论抓取 | 实时监控 |
-|---|---|
-| ![评论抓取](docs/screenshots/comments.png) | ![实时监控](docs/screenshots/monitor.png) |
+**💬 评论抓取**
 
-| 视频采集 | 浅色主题 |
-|---|---|
-| ![视频采集](docs/screenshots/collector.png) | ![浅色主题](docs/screenshots/settings_light.png) |
+![评论抓取](docs/screenshots/comments.png)
+
+**📊 视频采集**
+
+![视频采集](docs/screenshots/collector.png)
+
+**📡 实时监控（演示数据）**
+
+![实时监控](docs/screenshots/monitor.png)
 
 ## 📥 下载
 

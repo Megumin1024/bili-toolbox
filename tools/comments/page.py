@@ -8,7 +8,7 @@ from app.widgets import PathRow, muted
 
 from .pipeline import run_pipeline
 
-SAMPLE_LINK = "https://t.bilibili.com/1242626908874604548"
+SAMPLE_LINK = "粘贴动态或视频链接：t.bilibili.com/… · bilibili.com/video/BV… · b23.tv/… · av…"
 
 
 class CommentsPage(TaskPage):
