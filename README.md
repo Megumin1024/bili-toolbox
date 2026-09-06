@@ -168,7 +168,3 @@ bili-toolbox/
 
 [MIT](LICENSE) © 2026 Megumin1024
 
-## 🙏 参考
-
-- [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect) —— B 站接口文档社区
-- [biliTickerBuy](https://github.com/mikf/biliTickerBuy) —— 浏览器指纹与请求对抗思路参考
