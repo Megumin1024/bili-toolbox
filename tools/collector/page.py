@@ -1,5 +1,9 @@
 # -*- coding: utf-8 -*-
 """视频采集页。"""
+import re
+from pathlib import Path
+from urllib.parse import urlsplit
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QFormLayout, QGroupBox, QHBoxLayout,
                                QLabel, QLineEdit, QPlainTextEdit,
@@ -14,6 +18,9 @@ from .pipeline import run_pipeline
 class CollectorPage(TaskPage):
     tool_title = "视频采集"
     tool_subtitle = "视频 / 收藏夹 / 合集 批量采集公开数据 → 快照对比 / 定时追踪 → Excel（免登录）"
+    tool_module = "视频采集"
+    history_enabled = True
+    history_tool_id = "collector"
 
     def build_params(self):
         self.params_lay.addWidget(QLabel("视频来源（每行一个：视频链接/BV/av 号；收藏夹、合集、"
@@ -82,6 +89,43 @@ class CollectorPage(TaskPage):
     def pipeline(self):
         return run_pipeline
 
+    def history_target_summary(self, params):
+        sources = params.get("sources", [])
+        summaries = [_safe_source_summary(source) for source in sources]
+        return "；".join(summaries)[:320] or "视频来源（已脱敏）"
+
+    def history_reusable_params(self, params):
+        return {
+            "sources": list(params.get("sources", [])),
+            "out_dir": params.get("out_dir", ""),
+            "sleep": params.get("sleep", 0.3),
+            "monitor": bool(params.get("monitor", False)),
+            "interval_min": params.get("interval_min", 60),
+            "rounds": params.get("rounds", 5),
+            "open_result": bool(params.get("open_result", False)),
+        }
+
+    def history_output_paths(self, result):
+        if not isinstance(result, dict):
+            return []
+        paths = [result.get("xlsx")]
+        output_dir = result.get("dir")
+        if output_dir:
+            paths.append(str(Path(output_dir) / "snapshots.jsonl"))
+        return paths
+
+    def apply_reusable_params(self, params):
+        sources = params.get("sources", [])
+        self.src_edit.setPlainText("\n".join(str(source) for source in sources))
+        self.out_row.set_value(params.get("out_dir", ""))
+        self.sleep_edit.setText(str(params.get("sleep", 0.3)))
+        self.radio_monitor.setChecked(bool(params.get("monitor", False)))
+        self.radio_once.setChecked(not bool(params.get("monitor", False)))
+        self.interval_edit.setText(str(params.get("interval_min", 60)))
+        self.rounds_edit.setText(str(params.get("rounds", 5)))
+        self.auto_open.setChecked(bool(params.get("open_result", False)))
+        self.src_edit.setFocus()
+
     def on_finished(self, result):
         self.result_card.show_result(
             f"完成 ✓ {result['videos']} 个视频 / {result['snapshots']} 快照 / "
@@ -89,3 +133,22 @@ class CollectorPage(TaskPage):
             [("Excel 报告", result["xlsx"]),
              ("快照数据(jsonl)", str(result["dir"] + "/snapshots.jsonl")),
              ("打开输出目录", result["dir"])])
+
+
+def _safe_source_summary(value):
+    text = " ".join(str(value or "").split())
+    match = re.search(r"(?i)\b(BV[0-9A-Za-z]+|av\d+)\b", text)
+    if match:
+        return match.group(1)
+    try:
+        candidate = text if "://" in text else f"https://{text}"
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower()
+        if host == "b23.tv" or host.endswith(".bilibili.com") or host == "bilibili.com":
+            path = parsed.path.rstrip("/") or "/"
+            return f"{host}{path}"[:240]
+    except ValueError:
+        pass
+    if text.lower().endswith(".txt"):
+        return f"列表文件：{Path(text).name}"
+    return "视频来源（已脱敏）"

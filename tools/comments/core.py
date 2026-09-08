@@ -35,6 +35,10 @@ def random_jitter():
     return random.random() * 0.1
 
 
+class TaskCancelled(Exception):
+    """表示调用方主动取消当前任务。"""
+
+
 # ============================ gRPC 抓取 ============================
 
 def norm_grpc(r, root_rpid=None):
@@ -74,6 +78,10 @@ class Crawler:
         self.out_path = self.out_dir / "comments.jsonl"
         self.ckpt_path = self.out_dir / "checkpoint.json"
         self.ckpt = self._load_ckpt()
+        # ckpt 中的字段是持久化的上次中断标记；以下两个字段只表示本次 crawl()。
+        self._run_aborted = False
+        self._run_cancelled = False
+        self._run_error = None
         self.channel = grpc.secure_channel(GRPC_HOST, grpc.ssl_channel_credentials())
         self.stub = reply_pb2_grpc.ReplyStub(self.channel)
         self.md = metadata or [("user-agent", UA_APP)]
@@ -83,12 +91,16 @@ class Crawler:
     def _load_ckpt(self):
         if self.ckpt_path.exists():
             try:
-                return json.loads(self.ckpt_path.read_text(encoding="utf-8"))
+                data = json.loads(self.ckpt_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    data.setdefault("aborted", False)
+                    data.setdefault("cancelled", False)
+                    return data
             except ValueError:
                 pass
         return {"phase": "main", "cursor_next": 0, "main_done": 0, "sub_done": 0,
                 "pending_roots": [], "next_root_index": 0, "sub_cursor_next": 0,
-                "pages": 0, "aborted": False}
+                "pages": 0, "aborted": False, "cancelled": False}
 
     def _save_ckpt(self):
         tmp = self.ckpt_path.with_suffix(".tmp")
@@ -107,7 +119,7 @@ class Crawler:
         last = None
         for i in range(tries):
             if self.cancel():
-                raise RuntimeError("已取消")
+                raise TaskCancelled()
             try:
                 if self._tls_ok:
                     return self._call_tls(fn, req)
@@ -117,6 +129,9 @@ class Crawler:
                 wait = min(2 ** i * 2, 30)
                 self.progress(level="warn", text=f"gRPC {e.code()}，{wait:.0f}s 后重试")
                 time.sleep(wait)
+                # 最后一次重试也可能在退避期间收到取消请求，不能再落到运行异常。
+                if self.cancel():
+                    raise TaskCancelled()
             except grpc_tls.GrpcTlsError as e:
                 self._tls_ok = False  # 实验通道失败即回退 grpcio，不消耗后续重试
                 self.progress(level="warn",
@@ -127,19 +142,49 @@ class Crawler:
         """清空断点（新一轮抓取）。"""
         self.ckpt = {"phase": "main", "cursor_next": 0, "main_done": 0, "sub_done": 0,
                      "pending_roots": [], "next_root_index": 0, "sub_cursor_next": 0,
-                     "pages": 0, "aborted": False}
+                     "pages": 0, "aborted": False, "cancelled": False}
+        self._run_aborted = False
+        self._run_cancelled = False
+        self._run_error = None
+        self._save_ckpt()
+
+    def _mark_aborted(self, cancelled=False, error=None):
+        """同时保存断点，并区分本次运行状态与断点中的上次中断标记。"""
+        self._run_aborted = True
+        self._run_cancelled = bool(cancelled)
+        self._run_error = str(error) if error is not None else None
+        self.ckpt["aborted"] = True
+        self.ckpt["cancelled"] = bool(cancelled)
         self._save_ckpt()
 
     def crawl(self):
         """执行两阶段抓取，返回统计 dict。中断(取消/限页)时标记 aborted。"""
+        # 上一次取消/限页/异常只属于旧运行，不能阻止本次从断点继续。
+        self._run_aborted = False
+        self._run_cancelled = False
+        self._run_error = None
+        self.ckpt["aborted"] = False
+        self.ckpt["cancelled"] = False
         with open(self.out_path, "a", encoding="utf-8") as out:
             self._phase_main(out)
-            if not self.ckpt.get("aborted"):
+            if not self._run_aborted:
                 self._phase_sub(out)
         self.channel.close()
         self._save_ckpt()
+        if self._run_cancelled:
+            status = "cancelled"
+        elif self._run_error:
+            status = "error"
+        elif self._run_aborted:
+            status = "interrupted"
+        else:
+            status = "completed"
         return {"main": self.ckpt["main_done"], "sub": self.ckpt["sub_done"],
-                "pages": self.ckpt["pages"], "aborted": self.ckpt.get("aborted", False)}
+                "pages": self.ckpt["pages"],
+                "aborted": self._run_aborted,
+                "cancelled": self._run_cancelled,
+                "status": status,
+                "error": self._run_error}
 
     def _phase_main(self, out):
         ck = self.ckpt
@@ -148,18 +193,19 @@ class Crawler:
         self.progress(phase="主楼", text=f"从游标 {ck['cursor_next']} 续传")
         while True:
             if self.cancel():
-                ck["aborted"] = True
-                self._save_ckpt()
+                self._mark_aborted(cancelled=True)
                 return
             req = reply_pb2.MainListReq(oid=self.oid, type=self.rtype,
                                         cursor=reply_pb2.CursorReq(next=ck["cursor_next"],
                                                                    mode=2))
             try:
                 resp = self._call(self.stub.MainList, req)
+            except TaskCancelled:
+                self._mark_aborted(cancelled=True)
+                return
             except RuntimeError as e:
                 self.progress(level="error", text=f"主楼阶段终止: {e}")
-                ck["aborted"] = True
-                self._save_ckpt()
+                self._mark_aborted(error=f"主楼阶段终止：{e}")
                 return
             for r in resp.replies:
                 out.write(json.dumps(norm_grpc(r), ensure_ascii=False) + "\n")
@@ -173,8 +219,7 @@ class Crawler:
                           next=ck["cursor_next"], is_end=is_end,
                           pending=len(ck["pending_roots"]))
             if self.max_pages and ck["pages"] >= self.max_pages:
-                ck["aborted"] = True
-                self._save_ckpt()
+                self._mark_aborted()
                 return
             if is_end:
                 ck["phase"] = "sub"
@@ -192,8 +237,7 @@ class Crawler:
         pending = ck.get("pending_roots", [])
         while idx < len(pending):
             if self.cancel():
-                ck["aborted"] = True
-                self._save_ckpt()
+                self._mark_aborted(cancelled=True)
                 return
             rpid, _count = pending[idx]
             sub_next = ck.get("sub_cursor_next", 0)
@@ -203,10 +247,12 @@ class Crawler:
                                                                          mode=2))
                 try:
                     resp = self._call(self.stub.DetailList, req)
+                except TaskCancelled:
+                    self._mark_aborted(cancelled=True)
+                    return
                 except RuntimeError as e:
                     self.progress(level="error", text=f"楼中楼 {rpid} 终止: {e}")
-                    ck["aborted"] = True
-                    self._save_ckpt()
+                    self._mark_aborted(error=f"楼中楼 {rpid} 终止：{e}")
                     return
                 for sub in (resp.root.replies if resp.root else []):
                     out.write(json.dumps(norm_grpc(sub, root_rpid=rpid),
@@ -224,8 +270,7 @@ class Crawler:
             ck["next_root_index"] = idx
             ck["sub_cursor_next"] = 0
             if self.max_pages and ck["pages"] >= self.max_pages:
-                ck["aborted"] = True
-                self._save_ckpt()
+                self._mark_aborted()
                 return
             time.sleep(self.sleep)
         self._save_ckpt()

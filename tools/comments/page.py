@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
 """评论抓取页。"""
+import re
+from urllib.parse import urlsplit
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QFormLayout, QLineEdit, QWidget)
 
@@ -14,6 +17,9 @@ SAMPLE_LINK = "粘贴动态或视频链接：t.bilibili.com/… · bilibili.com/
 class CommentsPage(TaskPage):
     tool_title = "评论抓取"
     tool_subtitle = "动态 / 视频 · 游客 gRPC 通道全量评论 → 精确分析 → Excel（免登录）"
+    tool_module = "评论分析"
+    history_enabled = True
+    history_tool_id = "comments"
 
     def build_params(self):
         form = QFormLayout()
@@ -61,6 +67,31 @@ class CommentsPage(TaskPage):
     def pipeline(self):
         return run_pipeline
 
+    def history_target_summary(self, params):
+        return _safe_target_summary(params.get("url", ""))
+
+    def history_reusable_params(self, params):
+        return {
+            "url": params.get("url", ""),
+            "out_dir": params.get("out_dir", ""),
+            "sleep": params.get("sleep", 0.2),
+            "use_tls_grpc": bool(params.get("use_tls_grpc", False)),
+            "open_result": bool(params.get("open_result", True)),
+        }
+
+    def history_output_paths(self, result):
+        if not isinstance(result, dict):
+            return []
+        return [result.get(key) for key in ("xlsx", "report", "jsonl")]
+
+    def apply_reusable_params(self, params):
+        self.link_edit.setText(str(params.get("url", "")))
+        self.out_row.set_value(params.get("out_dir", ""))
+        self.sleep_edit.setText(str(params.get("sleep", 0.2)))
+        self.tls_check.setChecked(bool(params.get("use_tls_grpc", False)))
+        self.auto_open.setChecked(bool(params.get("open_result", True)))
+        self.link_edit.setFocus()
+
     def on_finished(self, result):
         self.result_card.show_result(
             f"完成 ✓ 共 {result['rows']:,} 条评论（主楼 {result['stats']['main']:,} + "
@@ -69,3 +100,25 @@ class CommentsPage(TaskPage):
              ("分析报告(MD)", result["report"]),
              ("原始数据(jsonl)", result["jsonl"]),
              ("打开输出目录", result["dir"])])
+
+
+def _safe_target_summary(value):
+    """只保留 B 站目标的主机/路径或显式 ID，丢弃查询参数。"""
+    text = " ".join(str(value or "").split())
+    if not text:
+        return "评论目标（已脱敏）"
+    match = re.search(r"(?i)\b(BV[0-9A-Za-z]+|av\d+)\b", text)
+    if match:
+        return match.group(1)
+    if text.isdigit():
+        return f"动态 ID {text}"
+    try:
+        candidate = text if "://" in text else f"https://{text}"
+        parsed = urlsplit(candidate)
+        host = (parsed.hostname or "").lower()
+        if host == "b23.tv" or host.endswith(".bilibili.com") or host == "bilibili.com":
+            path = parsed.path.rstrip("/") or "/"
+            return f"{host}{path}"[:240]
+    except ValueError:
+        pass
+    return "评论目标（已脱敏）"

@@ -8,46 +8,102 @@
 <script>if (typeof echarts === 'undefined') { document.write('<script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.1/echarts.min.js"><\/script>'); }</script>
 <style>
   :root {
-    --bg: #0b0f1a;
-    --panel: #121828;
-    --border: #1f2a40;
-    --text: #dbe4f3;
-    --muted: #7f92b2;
+    color-scheme: dark;
+    --bg: #0f1324;
+    --panel: #171c31;
+    --panel-2: #1d243d;
+    --border: #303a60;
+    --border-soft: #242d4b;
+    --text: #eaf0ff;
+    --heading: #ffffff;
+    --muted: #94a1c3;
     --pink: #fb7299;
-    --blue: #23ade5;
-    --green: #5ad8a6;
-    --orange: #f5a623;
+    --blue: #55c7f3;
+    --green: #69d7b0;
+    --orange: #f6c86b;
+    --danger: #ff667a;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { min-width: 320px; background: var(--bg); }
   body {
-    background: var(--bg); color: var(--text);
-    font-family: "Microsoft YaHei", "PingFang SC", "Segoe UI", sans-serif;
-    padding: 20px 24px 40px;
+    min-height: 100vh;
+    color: var(--text);
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    padding: 22px 24px 36px;
+    background:
+      radial-gradient(circle at 84% -10%, rgba(251,114,153,.14), transparent 30%),
+      radial-gradient(circle at 8% 8%, rgba(85,199,243,.12), transparent 26%),
+      linear-gradient(rgba(48,58,96,.10) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(48,58,96,.10) 1px, transparent 1px),
+      var(--bg);
+    background-size: auto, auto, 42px 42px, 42px 42px, auto;
   }
-  header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap; margin-bottom: 18px; }
-  h1 { font-size: 22px; font-weight: 700; line-height: 1.3; }
+  .shell { width: min(1540px, 100%); margin: 0 auto; }
+  header {
+    position: relative; overflow: hidden;
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 20px; flex-wrap: wrap; margin-bottom: 14px; padding: 18px 20px 20px;
+    background: linear-gradient(110deg, rgba(23,28,49,.97) 0 72%, rgba(53,32,57,.92));
+    border: 1px solid var(--border-soft); border-radius: 16px;
+    box-shadow: 0 16px 45px rgba(4,7,18,.20);
+  }
+  header::after {
+    content: ""; position: absolute; left: 20px; right: 20px; bottom: 0;
+    height: 3px; border-radius: 2px;
+    background: linear-gradient(90deg, var(--pink), var(--blue) 56%, transparent);
+  }
+  .eyebrow {
+    margin-bottom: 6px; color: var(--blue);
+    font: 700 11px/1.2 "Segoe UI Variable", "Segoe UI", sans-serif;
+    letter-spacing: .12em;
+  }
+  h1 { color: var(--heading); font-size: clamp(20px, 2vw, 26px); font-weight: 700; line-height: 1.35; }
   h1 a { color: var(--text); text-decoration: none; }
   h1 a:hover { color: var(--blue); }
   .sub { color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.7; }
   .sub a { color: var(--blue); text-decoration: none; }
   .head-right { text-align: right; flex-shrink: 0; }
-  .badge { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; padding: 4px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel); }
+  .badge {
+    display: inline-flex; align-items: center; gap: 7px; max-width: min(560px, 72vw);
+    font-size: 13px; padding: 6px 12px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--panel-2);
+  }
   .badge .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-  .badge.ok .dot { background: var(--green); box-shadow: 0 0 6px var(--green); }
-  .badge.err { color: #ff8f8f; border-color: #5a2733; }
-  .badge.err .dot { background: #ff5f5f; box-shadow: 0 0 6px #ff5f5f; }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 14px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .badge.ok { color: var(--green); background: rgba(105,215,176,.09); }
+  .badge.ok .dot { background: var(--green); box-shadow: 0 0 8px rgba(105,215,176,.75); }
+  .badge.err { color: #ff9aab; border-color: rgba(255,102,122,.5); background: rgba(255,102,122,.09); }
+  .badge.err .dot { background: var(--danger); box-shadow: 0 0 8px rgba(255,102,122,.7); }
+  .cards {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin-bottom: 14px;
+  }
+  .card {
+    position: relative; overflow: hidden; min-width: 0;
+    background: linear-gradient(145deg, var(--panel), rgba(29,36,61,.96));
+    border: 1px solid var(--border-soft); border-radius: 13px; padding: 14px 16px;
+    box-shadow: 0 10px 28px rgba(4,7,18,.12);
+  }
+  .card::before {
+    content: ""; position: absolute; left: 0; top: 13px; bottom: 13px; width: 2px;
+    background: linear-gradient(var(--pink), var(--blue));
+  }
   .card .label { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; align-items: center; }
-  .card .value { font-size: 26px; font-weight: 700; margin-top: 6px; font-variant-numeric: tabular-nums; }
+  .card .value {
+    color: var(--heading); font: 700 27px/1.25 "Segoe UI Variable", "Segoe UI", sans-serif;
+    margin-top: 7px; font-variant-numeric: tabular-nums;
+  }
   .card .foot { font-size: 12px; color: var(--muted); margin-top: 4px; min-height: 16px; }
   .card .foot .up { color: var(--green); }
-  .card .ico { font-size: 15px; }
+  .card .ico { color: var(--blue); font-size: 15px; filter: saturate(.8); }
   .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
-  @media (max-width: 980px) { .grid { grid-template-columns: 1fr; } }
-  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
+  .panel {
+    min-width: 0; background: rgba(23,28,49,.96);
+    border: 1px solid var(--border-soft); border-radius: 14px; padding: 15px 17px;
+    box-shadow: 0 12px 34px rgba(4,7,18,.13);
+  }
   .panel.wide { grid-column: 1 / -1; }
-  .panel h2 { font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 8px; }
+  .panel h2 { font-size: 15px; font-weight: 600; color: var(--heading); margin-bottom: 8px; }
+  .panel h2::before { content: "✦"; color: var(--pink); margin-right: 7px; font-size: 11px; }
   .panel h2 small { color: var(--muted); font-weight: 400; margin-left: 8px; }
   .chart { height: 280px; }
   .chart.tall { height: 320px; }
@@ -56,12 +112,44 @@
   .analysis .dim { color: var(--muted); }
   .analysis .sec { color: var(--blue); font-weight: 600; }
   footer { margin-top: 18px; color: var(--muted); font-size: 12px; text-align: center; }
-  #fatal { padding: 40px; text-align: center; color: var(--muted); font-size: 14px; }
+  #fatal {
+    margin-top: 14px; padding: 44px 20px; text-align: center; color: #ff9aab;
+    font-size: 14px; background: rgba(255,102,122,.07);
+    border: 1px solid rgba(255,102,122,.4); border-radius: 14px;
+  }
+  .fatal-state main { display: none; }
+  @media (max-width: 980px) {
+    body { padding: 16px 18px 28px; }
+    .grid { grid-template-columns: 1fr; }
+    .panel.wide { grid-column: auto; }
+    .chart.tall { height: 290px; }
+  }
+  @media (max-width: 768px) {
+    body { padding: 12px 12px 24px; background-size: auto, auto, 32px 32px, 32px 32px, auto; }
+    header { padding: 15px 15px 18px; border-radius: 13px; }
+    header::after { left: 15px; right: 15px; }
+    .head-right { width: 100%; text-align: left; }
+    .badge { max-width: 100%; }
+    .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .card { padding: 12px 13px; }
+    .card .value { font-size: 23px; }
+    .panel { padding: 13px 12px; }
+    .panel h2 small { display: block; margin: 4px 0 0 18px; }
+    .chart, .chart.tall { height: 260px; }
+  }
+  @media (max-width: 440px) {
+    .cards { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { scroll-behavior: auto !important; transition: none !important; }
+  }
 </style>
 </head>
 <body>
+<div class="shell">
 <header>
   <div class="head-left">
+    <div class="eyebrow">✦ B站工具箱 · 实时数据</div>
     <h1><a id="v-title" href="#" target="_blank" rel="noopener">正在加载…</a></h1>
     <div class="sub" id="v-meta">—</div>
   </div>
@@ -85,20 +173,24 @@
 </main>
 
 <footer>数据来源：B站公开接口（只读） · 页面每 <span id="foot-interval">60</span> 秒自动刷新 · 采集通道 <span id="net-info">—</span> · 仅供学习参考</footer>
-<div id="fatal" style="display:none">ECharts 加载失败，请检查网络后刷新页面。</div>
+<div id="fatal" style="display:none">图表加载失败，请检查网络后刷新页面。</div>
+</div>
 
 <script>
 if (typeof echarts === 'undefined') {
+  document.body.classList.add('fatal-state');
   document.getElementById('fatal').style.display = 'block';
+  document.getElementById('status').className = 'badge err';
+  document.getElementById('status-text').textContent = '图表组件加载失败';
 } else {
   main();
 }
 
 function main() {
   const C = {
-    view: '#23ade5', like: '#fb7299', coin: '#f5a623', favorite: '#ffd044',
-    share: '#7ee0d2', danmaku: '#9d8cff', reply: '#6ec7ff', online: '#5ad8a6',
-    axis: '#8fa3c0', split: '#1a2438', line: '#2a3a55'
+    view: '#55c7f3', like: '#fb7299', coin: '#f6c86b', favorite: '#ffe18a',
+    share: '#76e2d0', danmaku: '#a99cf6', reply: '#86d4ff', online: '#69d7b0',
+    axis: '#94a1c3', split: '#242d4b', line: '#303a60'
   };
   const charts = {};
   let nextTickAt = 0;
@@ -136,8 +228,8 @@ function main() {
   });
   const baseTooltip = trigger => ({
     trigger,
-    backgroundColor: '#1a2236', borderColor: '#2a3a55',
-    textStyle: { color: '#dbe4f3', fontSize: 12 },
+    backgroundColor: '#171c31', borderColor: '#303a60',
+    textStyle: { color: '#eaf0ff', fontSize: 12 },
     valueFormatter: v => full(v)
   });
 
@@ -151,7 +243,7 @@ function main() {
       grid: { left: 8, right: 16, top: legend ? 34 : 24, bottom: 4, containLabel: true },
       legend: legend ? { textStyle: { color: C.axis, fontSize: 11 }, top: 2, icon: 'roundRect', itemWidth: 12, itemHeight: 6 } : undefined,
       tooltip: Object.assign(baseTooltip('axis'), {
-        axisPointer: { type: 'line', lineStyle: { color: '#3a4c6e' } }
+        axisPointer: { type: 'line', lineStyle: { color: '#55c7f3' } }
       }),
       xAxis: Object.assign(baseAxis(), { type: 'time', splitLine: { show: false },
         axisLabel: { color: C.axis, formatter: { hour: '{HH}:{mm}', minute: '{HH}:{mm}', second: '{HH}:{mm}' } } }),
@@ -207,7 +299,7 @@ function main() {
     samples.forEach(s => (s.online_pages || []).forEach(p => {
       if (!parts.find(x => x.part === p.part)) parts.push({ part: p.part, cid: p.cid });
     }));
-    const palette = ['#5ad8a6', '#23ade5', '#f5a623', '#9d8cff', '#fb7299'];
+    const palette = ['#69d7b0', '#55c7f3', '#f6c86b', '#a99cf6', '#fb7299'];
     return parts.map((p, i) => lineSeries(p.part,
       samples.map(s => {
         const hit = (s.online_pages || []).find(x => x.cid === p.cid);
@@ -299,7 +391,7 @@ function main() {
     charts['chart-view'].setOption(timeOption([
       lineSeries('播放量', samples.map(s => [s.ts * 1000, s.view]), C.view, {
         areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
-          colorStops: [{ offset: 0, color: 'rgba(35,173,229,0.35)' }, { offset: 1, color: 'rgba(35,173,229,0.02)' }] } }
+          colorStops: [{ offset: 0, color: 'rgba(85,199,243,0.38)' }, { offset: .52, color: 'rgba(251,114,153,0.11)' }, { offset: 1, color: 'rgba(85,199,243,0.01)' }] } }
       })
     ]), true);
 

@@ -15,6 +15,14 @@ from core.session import http_get_json  # noqa: F401  兼容旧引用
 from . import core
 
 
+def _raise_on_crawl_error(stats):
+    """把评论核心的真实运行异常交给 TaskRunner 的失败通道。"""
+    if not isinstance(stats, dict):
+        return
+    if stats.get("status") == "error" or stats.get("error"):
+        raise RuntimeError(stats.get("error") or "评论抓取阶段发生运行异常")
+
+
 def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
                  cancel=None, progress=None, open_result=False):
     """完整流水线。返回结果 dict。"""
@@ -67,6 +75,7 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
                            progress=p, cancel=lambda: bool(cancel and cancel()),
                            metadata=metadata, use_tls_grpc=use_tls_grpc)
     stats = crawler.crawl()
+    _raise_on_crawl_error(stats)
     rows = []
     seen = set()
     with open(crawler.out_path, encoding="utf-8") as fh:
