@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.spec.bak
+data/
+error.log
+test_cookies*
+.DS_Store
+verify/
+/BiliToolbox-*.zip
+docs/architecture/
+AGENTS.md
+docs/screenshots/*.png
+!docs/screenshots/comments.png
+!docs/screenshots/dashboard.png
