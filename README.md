@@ -39,6 +39,14 @@
 
 ![监控仪表盘](docs/screenshots/dashboard.png)
 
+**🌙 深色「数据终端」主题**
+
+![深色主题](docs/screenshots/comments-dark.png)
+
+**⚙️ 设置**
+
+![设置页](docs/screenshots/settings.png)
+
 ## 📥 下载
 
 前往 [**Releases**](https://github.com/Megumin1024/bili-toolbox/releases) 下载免安装版本：
@@ -157,4 +165,3 @@ bili-toolbox/
 ## 📄 许可证
 
 [MIT](LICENSE) © 2026 Megumin1024
-

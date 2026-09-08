@@ -5,7 +5,31 @@ GUI 模式: python main.py            （双击 exe 同样进入 GUI）
 """
 import sys
 import traceback
+import os
 from pathlib import Path
+
+
+_FROZEN_DLL_HANDLES = []
+
+
+def _prepare_frozen_dll_search():
+    """让 Windows 在打包版启动时能找到 Qt/Shiboken 的依赖 DLL。"""
+    if not getattr(sys, "frozen", False):
+        return
+
+    base = Path(getattr(sys, "_MEIPASS", Path(sys.executable).parent))
+    candidates = [base, base / "PySide6", base / "shiboken6"]
+    existing = [str(path) for path in candidates if path.is_dir()]
+
+    # PATH 兼容旧版 Windows；add_dll_directory 是 Windows 10+ 的明确搜索路径。
+    if existing:
+        os.environ["PATH"] = os.pathsep.join(existing + [os.environ.get("PATH", "")])
+    if hasattr(os, "add_dll_directory"):
+        for path in existing:
+            try:
+                _FROZEN_DLL_HANDLES.append(os.add_dll_directory(path))
+            except OSError:
+                pass
 
 
 def _asset(name):
@@ -14,6 +38,7 @@ def _asset(name):
 
 
 def main():
+    _prepare_frozen_dll_search()
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication
 
@@ -24,7 +49,7 @@ def main():
     if icon.exists():
         app.setWindowIcon(QIcon(str(icon)))
 
-    from core import config, output, session
+    from core import config, diagnostics, output, session
 
     cfg = config.load()
     if not cfg.get("out_dir"):
@@ -33,6 +58,8 @@ def main():
                       transport=cfg.get("transport") or "auto",
                       cookie_path=config.COOKIE_FILE)
 
+    # 走到这里说明应用已完成启动前初始化；旧启动错误不再显示为当前错误。
+    diagnostics.clear_startup_error()
     from app.main_window import MainWindow
     from app.theme import apply
     apply(app, cfg.get("theme") or "dark")
@@ -49,8 +76,14 @@ if __name__ == "__main__":
     except Exception:
         base = (Path(sys.executable).parent if getattr(sys, "frozen", False)
                 else Path(__file__).resolve().parent)
+        raw_error = traceback.format_exc()
         try:
-            (base / "error.log").write_text(traceback.format_exc(),
+            from core.diagnostics import sanitize_text
+            error_text = sanitize_text(raw_error)
+        except Exception:  # 启动依赖损坏时也不把原始敏感信息写入日志
+            error_text = "应用启动失败，详细信息无法安全记录。"
+        try:
+            (base / "error.log").write_text(error_text,
                                             encoding="utf-8")
         except OSError:
             pass
