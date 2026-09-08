@@ -6,7 +6,7 @@
 
 **现代化的 B 站公开数据采集与分析桌面应用**
 
-评论全量抓取 · 视频批量采集 · 实时数据监控 —— 免登录、开箱即用
+评论全量抓取 · 视频批量采集 · 实时数据监控 · 任务历史与运行诊断 —— 免登录、开箱即用
 
 [![Release](https://img.shields.io/github/v/release/Megumin1024/bili-toolbox?style=flat-square&color=fb7299)](https://github.com/Megumin1024/bili-toolbox/releases)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -26,6 +26,7 @@
 | 💬 **评论抓取** | 输入动态 / 视频链接，通过 gRPC 游客通道抓取**全量评论**（主楼 + 楼中楼），自动生成精确分析报告（用户结构、时间分布、高频词、表情、点赞榜）与多 sheet Excel。支持断点续传 |
 | 📊 **视频采集** | 视频 / 收藏夹 / 合集 / 系列 / txt 列表批量采集公开数据（播放、点赞、投币、收藏、分享、弹幕、评论），支持**定时追踪**模式并生成增速榜 Excel |
 | 📡 **实时监控** | 单视频实时数据仪表盘：8 项实时指标 + 5 组趋势图表 + 互动率分析，历史数据跨启动续接，适合长时挂机 |
+| ⚙️ **设置与诊断** | 深色 / 浅色主题、网络通道、代理池和输出目录配置；提供运行环境诊断、最近错误详情和可复用的任务历史 |
 
 **所有工具免登录使用**，内置统一的抗干扰网络层（见[下文](#-网络层设计)）。
 
@@ -43,9 +44,17 @@
 
 ![深色主题](docs/screenshots/comments-dark.png)
 
-**⚙️ 设置**
+**⚙️ 设置与运行诊断**
 
-![设置页](docs/screenshots/settings.png)
+![设置与运行诊断](docs/screenshots/settings.png)
+
+**🧾 任务历史**
+
+![任务历史](docs/screenshots/settings-history.png)
+
+**🧾 任务历史详情（深色主题）**
+
+![任务历史详情](docs/screenshots/settings-history-detail-dark.png)
 
 ## 📥 下载
 
@@ -83,12 +92,15 @@ pyinstaller build_toolbox.spec --noconfirm
 
 **实时监控**：输入 BV 号与采集间隔即可启动，仪表盘会自动在系统浏览器中打开（可点击「在浏览器打开」再次打开）。
 
+**设置与诊断**：在设置页切换主题、配置网络和默认输出目录；运行诊断会检查 Python、依赖、配置目录、输出目录及打包资源。最近错误与任务历史支持查看、复制、清理和复用参数。
+
 ## ⚙️ 设置
 
 - **主题**：深色 / 浅色，下拉即时切换
 - **传输通道**：`auto`（推荐）/ `h2-ja3` / `urllib`
 - **代理池**：逗号分隔，如 `direct,socks5://127.0.0.1:7890`
 - **默认输出目录**：默认为 exe 旁的 `导出` 目录
+- **任务历史**：任务历史和最近错误仅保存在本机配置目录，不会写入或上传到项目仓库；项目目录中的运行数据、日志和缓存由 `.gitignore` 排除
 
 ## 🧱 网络层设计
 

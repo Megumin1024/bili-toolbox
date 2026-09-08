@@ -29,6 +29,11 @@ apply(app, "light")
 # 历史截图使用临时文件，不污染用户真实配置目录或输出目录。
 _history_temp = tempfile.TemporaryDirectory(prefix="bili-toolbox-history-shot-")
 task_history.HISTORY_FILE = Path(_history_temp.name) / "task_history.json"
+# 历史详情中的结果文件使用固定的中性示例路径，避免把本机临时目录写进公开截图。
+_history_demo_output_root = Path(r"D:\BiliToolbox\导出") / (
+    "very-long-output-directory-name-for-history-"
+    "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+)
 task_history.save_history([])
 _history_demo_ready = False
 
@@ -92,15 +97,12 @@ def prepare_demo(page_index, state):
             "https://space.bilibili.com/10086/favlist?fid=2026")
 
     if state in ("history", "history-detail") and not _history_demo_ready:
-        root = Path(_history_temp.name) / (
-            "very-long-output-directory-name-for-history-"
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-        )
+        root = _history_demo_output_root
         records = [
-            ("completed", "2026-09-08T12:03:00+08:00", "评论抓取"),
-            ("failed", "2026-09-08T12:02:00+08:00", "视频采集"),
-            ("cancelled", "2026-09-08T12:01:00+08:00", "评论抓取"),
-            ("interrupted", "2026-09-08T12:00:00+08:00", "视频采集"),
+            ("completed", "2026-01-01T12:03:00+08:00", "评论抓取"),
+            ("failed", "2026-01-01T12:02:00+08:00", "视频采集"),
+            ("cancelled", "2026-01-01T12:01:00+08:00", "评论抓取"),
+            ("interrupted", "2026-01-01T12:00:00+08:00", "视频采集"),
         ]
         for status, started_at, tool_name in records:
             is_comments = tool_name == "评论抓取"
