@@ -5,6 +5,12 @@
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-09-10
+
+### 修复
+
+- 统一发布包、主窗口左下角和设置页“关于”区域的内部版本号。
+
 ## [1.0.2] - 2026-09-10
 
 ### 新增
@@ -64,7 +70,8 @@
 
 - 单一 PyInstaller 配置（onedir，约 45MB）
 
-[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Megumin1024/bili-toolbox/releases/tag/v1.0.0
