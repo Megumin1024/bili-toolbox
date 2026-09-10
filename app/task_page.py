@@ -1,13 +1,134 @@
 # -*- coding: utf-8 -*-
 """任务页基类：页头 + 参数 + 运行控制 + 结果 + 任务控制台。"""
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QFrame, QHBoxLayout, QLabel, QMessageBox,
-                               QPushButton, QScrollArea, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QFrame, QHBoxLayout, QLabel,
+                               QMessageBox, QPushButton, QInputDialog,
+                               QScrollArea, QVBoxLayout, QWidget)
 
-from core import diagnostics, task_history
+from core import diagnostics, task_history, task_presets
 
 from .task_runner import TaskRunner
 from .widgets import LogPanel, PageHeader, ProgressBlock, ResultCard, card, h2
+
+
+class PresetBar(QFrame):
+    """任务参数卡顶部的紧凑本地预设栏。"""
+
+    def __init__(self, tool_id, tool_name, collect_params, apply_params, parent=None):
+        super().__init__(parent)
+        self.tool_id = str(tool_id)
+        self.tool_name = str(tool_name)
+        self._collect_params = collect_params
+        self._apply_params = apply_params
+        self.setObjectName("presetBar")
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 2)
+        row.setSpacing(6)
+        row.addWidget(QLabel("任务预设"))
+
+        self.combo = QComboBox()
+        self.combo.setMinimumWidth(150)
+        self.combo.currentIndexChanged.connect(self._update_actions)
+        row.addWidget(self.combo, 1)
+
+        self.btn_apply = QPushButton("应用预设")
+        self.btn_apply.clicked.connect(self._on_apply)
+        row.addWidget(self.btn_apply)
+        self.btn_save = QPushButton("保存当前参数")
+        self.btn_save.clicked.connect(self._on_save)
+        row.addWidget(self.btn_save)
+        self.btn_delete = QPushButton("删除预设")
+        self.btn_delete.clicked.connect(self._on_delete)
+        row.addWidget(self.btn_delete)
+        self.refresh()
+
+    def _selected(self):
+        value = self.combo.currentData()
+        return value if isinstance(value, dict) else None
+
+    def _update_actions(self, _index=None):
+        enabled = self._selected() is not None
+        self.btn_apply.setEnabled(enabled)
+        self.btn_delete.setEnabled(enabled)
+
+    def refresh(self, selected_id=None):
+        current = selected_id
+        if current is None:
+            selected = self._selected()
+            current = selected.get("id") if selected else None
+        presets = task_presets.load_presets(self.tool_id)
+        self.combo.blockSignals(True)
+        self.combo.clear()
+        self.combo.addItem("选择任务预设", None)
+        selected_index = 0
+        for index, preset in enumerate(presets, start=1):
+            self.combo.addItem(preset["name"], preset)
+            if preset["id"] == current:
+                selected_index = index
+        self.combo.setCurrentIndex(selected_index)
+        self.combo.blockSignals(False)
+        self._update_actions()
+
+    def _on_apply(self):
+        preset = self._selected()
+        if preset is None:
+            return
+        try:
+            self._apply_params(dict(preset.get("params") or {}))
+        except (TypeError, ValueError):
+            QMessageBox.warning(self, "预设应用失败", "预设参数无法回填当前页面。")
+
+    def _on_save(self):
+        name, accepted = QInputDialog.getText(self, "保存任务预设", "预设名称：")
+        if not accepted:
+            return
+        try:
+            record = task_presets.create_or_update_preset(
+                name, self.tool_id, self.tool_name, self._collect_params(),
+            )
+        except task_presets.PresetNameConflict:
+            answer = QMessageBox.question(
+                self,
+                "预设已存在",
+                "同一工具下已经存在同名预设，是否覆盖？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                record = task_presets.create_or_update_preset(
+                    name, self.tool_id, self.tool_name, self._collect_params(),
+                    overwrite=True,
+                )
+            except (ValueError, task_presets.PresetStorageError) as exc:
+                QMessageBox.warning(self, "预设未保存", str(exc))
+                return
+        except (ValueError, task_presets.PresetStorageError) as exc:
+            QMessageBox.warning(self, "预设未保存", str(exc))
+            return
+        self.refresh(record["id"])
+
+    def _on_delete(self):
+        preset = self._selected()
+        if preset is None:
+            return
+        answer = QMessageBox.question(
+            self,
+            "删除任务预设",
+            f"确定删除预设“{preset['name']}”？\n只删除本地预设，不影响任务历史。",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        try:
+            task_presets.delete_preset(preset["id"])
+        except task_presets.PresetStorageError as exc:
+            QMessageBox.warning(self, "预设未删除", str(exc))
+            return
+        self.refresh()
 
 
 class TaskPage(QWidget):
@@ -16,6 +137,7 @@ class TaskPage(QWidget):
     tool_module = "任务流程"
     history_enabled = False
     history_tool_id = ""
+    preset_enabled = False
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -48,6 +170,9 @@ class TaskPage(QWidget):
 
         self.params_card, self.params_lay = card(variant="accent")
         self.params_lay.addWidget(h2("任务参数"))
+        preset_bar = self.build_preset_bar()
+        if preset_bar is not None:
+            self.params_lay.addWidget(preset_bar)
         self.build_params()
         root.addWidget(self.params_card)
 
@@ -74,6 +199,10 @@ class TaskPage(QWidget):
         self.result_card = ResultCard()
         root.addWidget(self.result_card)
 
+        post_result_card = self.build_post_result_card()
+        if post_result_card is not None:
+            root.addWidget(post_result_card)
+
         console_header = QHBoxLayout()
         console_header.setContentsMargins(2, 2, 2, 0)
         console_header.addWidget(h2("任务控制台"))
@@ -96,6 +225,23 @@ class TaskPage(QWidget):
     def build_params(self):
         raise NotImplementedError
 
+    def build_preset_bar(self):
+        if not self.preset_enabled:
+            return None
+        self.preset_bar = PresetBar(
+            self.history_tool_id,
+            self.tool_title,
+            self.collect_preset_params,
+            self.apply_preset_params,
+        )
+        return self.preset_bar
+
+    def collect_preset_params(self):
+        raise NotImplementedError
+
+    def apply_preset_params(self, params):
+        raise NotImplementedError
+
     def collect_params(self):
         """返回流水线 kwargs；校验失败抛 ValueError（信息展示给用户）。"""
         raise NotImplementedError
@@ -106,6 +252,10 @@ class TaskPage(QWidget):
     def on_finished(self, result):
         """任务成功后的结果卡片展示；默认空实现。"""
         self.result_card.show_result("完成 ✓", [])
+
+    def build_post_result_card(self):
+        """可选的结果后扩展区域；普通任务页默认不占用布局空间。"""
+        return None
 
     # ---- 任务历史钩子 ----
 

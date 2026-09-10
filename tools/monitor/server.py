@@ -17,6 +17,7 @@ import json
 import re
 import threading
 import time
+import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -61,11 +62,14 @@ class MonitorServer:
     """一个实例 = 一个视频的采集 + 仪表盘服务。start() 后通过 url 访问。"""
 
     def __init__(self, bvid, interval=60, transport="auto", proxy_spec=None,
-                 data_dir=None, cookie_path=None, log=None):
+                 data_dir=None, cookie_path=None, log=None,
+                 event_callback=None, session_id=None):
         self.bvid = bvid
         self.interval = max(5, min(3600, int(interval)))
         self.log = log or (lambda msg: print(f"[{time.strftime('%H:%M:%S')}] {msg}",
                                              flush=True))
+        self.event_callback = event_callback
+        self.session_id = str(session_id or uuid.uuid4().hex)
         self.data_dir = Path(data_dir) if data_dir else Path("data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.history_file = self.data_dir / f"history_{bvid}.jsonl"
@@ -77,6 +81,15 @@ class MonitorServer:
         self._server = None
         self._thread = None
         self._stop = threading.Event()
+
+    def _emit_event(self, event):
+        """把安全事件交给页面；回调异常绝不能影响采集循环。"""
+        if self.event_callback is None:
+            return
+        try:
+            self.event_callback(dict(event))
+        except Exception:  # noqa: BLE001 - 外部回调隔离且不得触碰 Qt
+            pass
 
     # ---------- 采集 ----------
 
@@ -194,11 +207,23 @@ class MonitorServer:
                          f"正在看={sample['online']} | "
                          f"通道={self.client.stats['last_transport']} "
                          f"{self.client.stats['last_latency_ms']}ms")
+                self._emit_event({
+                    "type": "sample_success",
+                    "session_id": self.session_id,
+                    "ts": sample.get("ts"),
+                    "view": sample.get("view"),
+                })
             except Exception as exc:  # noqa: BLE001
                 fails += 1
                 with self.state.lock:
                     self.state.last_error = f"{type(exc).__name__}: {exc}"
                 self.log(f"采集失败(连续{fails}次): {exc}")
+                self._emit_event({
+                    "type": "sample_failure",
+                    "session_id": self.session_id,
+                    "ts": int(time.time()),
+                    "consecutive_failures": fails,
+                })
 
             sleep_for = min(15 * fails, self.interval) if fails else self.interval
             end = time.time() + max(0.0, sleep_for - (time.time() - started))

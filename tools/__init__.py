@@ -4,7 +4,9 @@
 from app.registry import ToolSpec
 from .collector.page import CollectorPage
 from .comments.page import CommentsPage
+from .data_check.page import DataCheckPage
 from .monitor.page import MonitorPage
+from .report_center.page import ReportCenterPage
 
 TOOLS = [
     ToolSpec(id="comments", name="评论抓取",
@@ -16,4 +18,10 @@ TOOLS = [
     ToolSpec(id="monitor", name="实时监控",
              subtitle="视频实时数据仪表盘",
              icon="fa5s.broadcast-tower", factory=MonitorPage),
+    ToolSpec(id="data_check", name="数据检查",
+             subtitle="检查本地 Excel / JSONL，不修改源文件",
+             icon="fa5s.clipboard-check", factory=DataCheckPage),
+    ToolSpec(id="report_center", name="报告中心",
+             subtitle="浏览、对比和导出本地评论/快照/监控历史",
+             icon="fa5s.file-alt", factory=ReportCenterPage),
 ]

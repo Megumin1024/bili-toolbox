@@ -13,7 +13,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PYTHON_ROOTS = (ROOT / "app", ROOT / "core", ROOT / "tools")
-FEATURES = {"comments", "collector", "monitor"}
+FEATURES = {"comments", "collector", "monitor", "data_check", "report_center"}
 
 
 def module_name(path: Path) -> str:

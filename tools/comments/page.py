@@ -20,6 +20,7 @@ class CommentsPage(TaskPage):
     tool_module = "评论分析"
     history_enabled = True
     history_tool_id = "comments"
+    preset_enabled = True
 
     def build_params(self):
         form = QFormLayout()
@@ -64,6 +65,19 @@ class CommentsPage(TaskPage):
                 "use_tls_grpc": self.tls_check.isChecked(),
                 "open_result": self.auto_open.isChecked()}
 
+    def collect_preset_params(self):
+        try:
+            sleep = max(0.05, float(self.sleep_edit.text().strip() or 0.2))
+        except ValueError:
+            raise ValueError("限速需为数字（秒/页）")
+        return {
+            "url": self.link_edit.text().strip(),
+            "out_dir": self.out_row.value(),
+            "sleep": sleep,
+            "use_tls_grpc": self.tls_check.isChecked(),
+            "open_result": self.auto_open.isChecked(),
+        }
+
     def pipeline(self):
         return run_pipeline
 
@@ -91,6 +105,9 @@ class CommentsPage(TaskPage):
         self.tls_check.setChecked(bool(params.get("use_tls_grpc", False)))
         self.auto_open.setChecked(bool(params.get("open_result", True)))
         self.link_edit.setFocus()
+
+    def apply_preset_params(self, params):
+        self.apply_reusable_params(params)
 
     def on_finished(self, result):
         self.result_card.show_result(

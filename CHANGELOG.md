@@ -5,6 +5,20 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-09-10
+
+### 新增
+
+- **任务预设**：评论抓取、视频采集和实时监控支持保存、应用及删除本地任务参数
+- **视频采集对比看板**：多视频采集时展示总量、单视频变化、增速和互动率等对比数据
+- **数据检查与修复**：检查本地 Excel / JSONL 文件，并在不覆盖源文件的前提下生成修复副本和修复清单
+- **本地报告中心**：浏览已有评论结果、视频快照和监控历史，支持文件对比、时间段对比和 JSONL / XLSX 导出
+- **监控提醒**：支持里程碑、增长停滞、异常突增、连续失败与恢复提醒，并提供 Windows 通知和声音提醒
+
+### 变更
+
+- 补充新功能对应页面、本地数据处理、测试与用户截图
+
 ## [1.0.1] - 2026-09-08
 
 ### 新增
@@ -50,6 +64,7 @@
 
 - 单一 PyInstaller 配置（onedir，约 45MB）
 
-[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/Megumin1024/bili-toolbox/releases/tag/v1.0.0
