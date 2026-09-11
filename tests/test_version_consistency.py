@@ -9,7 +9,7 @@ from app import main_window, settings_page
 
 
 class VersionConsistencyTests(unittest.TestCase):
-    EXPECTED_RELEASE_VERSION = "1.0.3"
+    EXPECTED_RELEASE_VERSION = "1.0.4"
 
     def test_core_version_is_the_expected_release_version(self):
         self.assertEqual(core.__version__, self.EXPECTED_RELEASE_VERSION)

@@ -10,7 +10,6 @@ import importlib
 import json
 import os
 import platform
-import re
 import sys
 import tempfile
 from dataclasses import asdict, dataclass
@@ -18,6 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import config, output
+from .redact import sanitize_text  # noqa: F401  脱敏实现已移入 core.redact，此处保留入口
 
 
 STATUS_OK = "ok"
@@ -418,46 +418,6 @@ def format_diagnostics(items, redact=True):
             "",
         ])
     return "\n".join(lines).rstrip()
-
-
-_SECRET_KEY_PATTERN = (
-    r"(?:set-cookie|access_token|refresh_token|authorization|sessdata|"
-    r"bili_jct|proxy[_ -]?(?:username|user|password)|cookie|bearer|"
-    r"token|csrf|password|代理用户名|代理密码)"
-)
-_SECRET_RE = re.compile(
-    r"(?i)(?<![A-Za-z0-9_])"
-    rf"(?P<key_quote>['\"]?)(?P<key>{_SECRET_KEY_PATTERN})(?P=key_quote)"
-    r"(?P<separator>\s*[:=：]\s*)"
-    r"(?:"
-    r"(?P<value_quote>['\"])(?P<quoted_value>.*?)(?P=value_quote)"
-    r"|(?P<bare_value>(?:bearer\s+)?[^\s,;，；\r\n'\"}]+)"
-    r")"
-)
-_URL_RE = re.compile(r"(?i)\b(?:https?|socks5?)://[^\s<>\"']+")
-_IP_RE = re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
-_WINDOWS_PATH_RE = re.compile(
-    r"(?i)\b[A-Z]:\\[^\r\n,;，；<>\"']+|\\\\[^\r\n,;，；<>\"']+"
-)
-
-
-def sanitize_text(value):
-    """脱敏错误详情，不展示凭据、完整 URL、IP 或本地完整路径。"""
-    text = str(value or "")[:16000]
-
-    def redact_secret(match):
-        key_quote = match.group("key_quote")
-        value_quote = match.group("value_quote") or ""
-        return (
-            f"{key_quote}{match.group('key')}{key_quote}"
-            f"{match.group('separator')}{value_quote}[已脱敏]{value_quote}"
-        )
-
-    text = _SECRET_RE.sub(redact_secret, text)
-    text = _URL_RE.sub("[网络地址已脱敏]", text)
-    text = _IP_RE.sub("[地址已脱敏]", text)
-    text = _WINDOWS_PATH_RE.sub("[本地路径已脱敏]", text)
-    return text
 
 
 def _error_record(timestamp, source, summary, details, state="history"):

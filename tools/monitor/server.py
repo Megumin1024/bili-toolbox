@@ -23,6 +23,7 @@ from pathlib import Path
 
 from core.client import BiliClient
 from core.proxy import ProxyPool
+from core.redact import sanitize_text
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
@@ -215,9 +216,11 @@ class MonitorServer:
                 })
             except Exception as exc:  # noqa: BLE001
                 fails += 1
+                # last_error 会经 GET /api/latest 离开进程，出口处强制脱敏
                 with self.state.lock:
-                    self.state.last_error = f"{type(exc).__name__}: {exc}"
-                self.log(f"采集失败(连续{fails}次): {exc}")
+                    self.state.last_error = sanitize_text(
+                        f"{type(exc).__name__}: {exc}")
+                self.log(f"采集失败(连续{fails}次): {sanitize_text(exc)}")
                 self._emit_event({
                     "type": "sample_failure",
                     "session_id": self.session_id,

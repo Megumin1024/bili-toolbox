@@ -481,6 +481,28 @@ class PageSignalThreadTests(unittest.TestCase):
         self.assertTrue(adapter.closed)
 
 
+def tearDownModule():
+    """释放本模块创建的页面和托盘对象，避免 Qt 原生对象堆积到解释器退出。"""
+    try:
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        from tools.monitor.page import MonitorPage
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    pages = [widget for widget in QApplication.allWidgets()
+             if isinstance(widget, MonitorPage)]
+    for page in pages:
+        page.on_app_close()
+        page.close()
+        page.deleteLater()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+
+
 class _Check:
     def __init__(self, value=False):
         self.value = bool(value)

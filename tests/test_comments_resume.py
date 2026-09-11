@@ -5,11 +5,19 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import grpc
 
+from core.cancel import CANCEL_POLL_SLICE
+from core.gate import RequestGate
 from tools.comments import core, pipeline
+
+
+def permissive_gate():
+    """离线闸门：不真等待、不依赖真实时钟，只保证 _call 的接线存在。"""
+    return RequestGate(min_interval=0.0, clock=lambda: 0.0,
+                       sleep=lambda _seconds: None)
 
 
 class FakeChannel:
@@ -46,6 +54,8 @@ def make_crawler(root):
     crawler.stub = SimpleNamespace(MainList=object(), DetailList=object())
     crawler.md = []
     crawler._tls_ok = False
+    crawler.gate = permissive_gate()
+    crawler._sleep_fn = lambda _seconds: None
     return crawler
 
 
@@ -62,19 +72,23 @@ class CommentResumeTests(unittest.TestCase):
         def fail_rpc(*_args, **_kwargs):
             raise FakeRpcError()
 
-        def sleep_during_backoff(seconds):
-            self.assertEqual(seconds, 2)
+        def sleeper(seconds):
+            # 退避按 0.25s 切片，取消才能在一秒内生效
+            self.assertAlmostEqual(seconds, CANCEL_POLL_SLICE)
             state["cancelled"] = True
 
         crawler.cancel = cancel
         crawler.progress = lambda **_kwargs: None
         crawler.md = []
         crawler._tls_ok = False
-        with patch.object(core.time, "sleep", side_effect=sleep_during_backoff):
-            with self.assertRaises(core.TaskCancelled):
-                crawler._call(fail_rpc, object(), tries=1)
+        crawler.gate = permissive_gate()
+        crawler._sleep_fn = sleeper
+        with self.assertRaises(core.TaskCancelled):
+            crawler._call(fail_rpc, object(), tries=1)
 
-        self.assertEqual(cancel_checks, [False, True])
+        # 取消检查点：循环开头、退避开头、退避首片之前各一次为 False，
+        # 首片睡完后（sleeper 置位）立刻变 True 并中断，不等满 2s。
+        self.assertEqual(cancel_checks, [False, False, False, True])
 
     def test_cancel_checkpoint_resumes_main_and_reaches_sub(self):
         with tempfile.TemporaryDirectory() as temp:

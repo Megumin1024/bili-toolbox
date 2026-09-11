@@ -396,7 +396,7 @@ class PipelineRoundBoundaryTests(unittest.TestCase):
     def test_pipeline_is_serial_and_fetches_each_video_once_per_round(self):
         calls = []
 
-        def fake_fetch(bvid):
+        def fake_fetch(bvid, cancel=None):
             calls.append(bvid)
             return snapshot(bvid, 100 + len(calls), 10 + len(calls), 1_700_000_000 + len(calls))
 
@@ -429,7 +429,7 @@ class PipelineRoundBoundaryTests(unittest.TestCase):
                 self.assertNotIn("path", json.dumps(event["dashboard"], ensure_ascii=False).lower())
 
     def test_snapshots_keys_and_excel_structure_stay_unchanged(self):
-        def fake_fetch(bvid):
+        def fake_fetch(bvid, cancel=None):
             return snapshot(bvid, 100, 10)
 
         with patch.object(collector_pipeline.session, "ensure_ready"), \
@@ -470,6 +470,9 @@ class CollectorPageTests(unittest.TestCase):
     def tearDown(self):
         self.page.close()
         self.page.deleteLater()
+        self.app.processEvents()
+        from PySide6.QtCore import QCoreApplication, QEvent
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
         self.app.processEvents()
 
     def _scroll(self):

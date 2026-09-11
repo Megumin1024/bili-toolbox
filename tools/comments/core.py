@@ -5,6 +5,8 @@
   伪装）
 - 可选实验通道 grpc_tls（Chrome TLS 指纹 gRPC），失败自动回退 grpcio
 - Excel 导出基于 core.xlsx 共享基建
+- 本模块自建 gRPC 通道、不走 BiliClient，因此**自己过全局闸门**
+  （core.gate.shared_gate）：这是全项目请求速率最高的一条流。
 """
 import json
 import random
@@ -17,6 +19,8 @@ from pathlib import Path
 import grpc
 
 from core import xlsx as xlsx_mod
+from core.cancel import wait as cancel_wait
+from core.gate import shared_gate
 
 from . import grpc_tls
 from . import reply_pb2, reply_pb2_grpc
@@ -67,14 +71,20 @@ class Crawler:
     """全量评论抓取（gRPC 游客通道，可取消、可限页、断点续传）。"""
 
     def __init__(self, oid, rtype, out_dir, sleep=0.2, max_pages=0,
-                 progress=None, cancel=None, metadata=None, use_tls_grpc=False):
+                 progress=None, cancel=None, metadata=None, use_tls_grpc=False,
+                 gate=None, sleeper=None):
         self.oid, self.rtype = int(oid), int(rtype)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        # sleep 是**业务间隔**（秒/页，用户可调）；sleeper 是等待实现，仅供注入。
         self.sleep = sleep
+        self._sleep_fn = sleeper or time.sleep
         self.max_pages = int(max_pages or 0)  # 0=不限
         self.progress = progress or (lambda **k: None)
         self.cancel = cancel or (lambda: False)
+        # 全局限速 + 熔断：本模块自建 gRPC 通道绕过 BiliClient，须自己过闸门
+        # 才能与其它工具共享同一份背压（生产路径共用进程级单例）。
+        self.gate = shared_gate() if gate is None else gate
         self.out_path = self.out_dir / "comments.jsonl"
         self.ckpt_path = self.out_dir / "checkpoint.json"
         self.ckpt = self._load_ckpt()
@@ -120,23 +130,45 @@ class Crawler:
         for i in range(tries):
             if self.cancel():
                 raise TaskCancelled()
+            if not self.gate.acquire(self.cancel, on_wait=self._log_gate_wait):
+                raise TaskCancelled()
             try:
                 if self._tls_ok:
-                    return self._call_tls(fn, req)
-                return fn(req, metadata=self.md, timeout=20)
+                    reply = self._call_tls(fn, req)
+                else:
+                    reply = fn(req, metadata=self.md, timeout=20)
+                self.gate.record_success()
+                return reply
             except grpc.RpcError as e:
                 last = e
+                # 只有明确的服务端限流（RESOURCE_EXHAUSTED）才算"平台在拦我们"，
+                # 用来开全局熔断；其余（UNAVAILABLE/DEADLINE_EXCEEDED 等）是传输层
+                # 故障，交给本方法自己的退避重试，不能污染熔断状态。
+                if e.code() == grpc.StatusCode.RESOURCE_EXHAUSTED:
+                    self.gate.record_block(f"grpc:{e.code()}")
+                else:
+                    self.gate.record_neutral()
                 wait = min(2 ** i * 2, 30)
                 self.progress(level="warn", text=f"gRPC {e.code()}，{wait:.0f}s 后重试")
-                time.sleep(wait)
-                # 最后一次重试也可能在退避期间收到取消请求，不能再落到运行异常。
-                if self.cancel():
+                # 退避改为可中断：旧实现是 time.sleep 完才检查取消，用户按下停止
+                # 后最长仍要空等 30s。
+                if not cancel_wait(wait, self.cancel, sleep=self._sleep_fn):
                     raise TaskCancelled()
             except grpc_tls.GrpcTlsError as e:
                 self._tls_ok = False  # 实验通道失败即回退 grpcio，不消耗后续重试
+                self.gate.record_neutral()
                 self.progress(level="warn",
                               text=f"Chrome-TLS gRPC 通道不可用({e})，已回退 grpcio 通道")
         raise RuntimeError(f"gRPC 连续失败: {last}")
+
+    def _pace(self, seconds):
+        """业务间隔等待；被取消返回 False（不再靠 sleep 完再检查）。"""
+        return cancel_wait(seconds, self.cancel, sleep=self._sleep_fn)
+
+    def _log_gate_wait(self, seconds, reason):
+        """闸门即将暂停时写进进度——否则抓取会静默卡住，用户不知道发生了什么。"""
+        self.progress(level="warn",
+                      text=f"全局闸门：{reason}，暂停 {seconds:.0f}s（全局限速/熔断）")
 
     def reset(self):
         """清空断点（新一轮抓取）。"""
@@ -229,7 +261,9 @@ class Crawler:
                 ck["phase"] = "sub"
                 self._save_ckpt()
                 return
-            time.sleep(self.sleep + random_jitter())
+            if not self._pace(self.sleep + random_jitter()):
+                self._mark_aborted(cancelled=True)
+                return
 
     def _phase_sub(self, out):
         ck = self.ckpt
@@ -265,14 +299,18 @@ class Crawler:
                               root_idx=idx + 1, root_total=len(pending))
                 if resp.cursor.isEnd:
                     break
-                time.sleep(self.sleep + random_jitter())
+                if not self._pace(self.sleep + random_jitter()):
+                    self._mark_aborted(cancelled=True)
+                    return
             idx += 1
             ck["next_root_index"] = idx
             ck["sub_cursor_next"] = 0
             if self.max_pages and ck["pages"] >= self.max_pages:
                 self._mark_aborted()
                 return
-            time.sleep(self.sleep)
+            if not self._pace(self.sleep):
+                self._mark_aborted(cancelled=True)
+                return
         self._save_ckpt()
 
 

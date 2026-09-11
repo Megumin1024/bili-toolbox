@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """评论抓取页。"""
 import re
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from PySide6.QtCore import Qt
@@ -8,6 +9,7 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QLineEdit, QWidget)
 
 from app.task_page import TaskPage
 from app.widgets import PathRow, muted
+from core import output as output_mod
 
 from .pipeline import run_pipeline
 
@@ -31,7 +33,8 @@ class CommentsPage(TaskPage):
         self.link_edit.setPlaceholderText(SAMPLE_LINK)
         form.addRow("动态/视频链接", self.link_edit)
 
-        default_out = str((self.cfg.get("out_dir") or ".") + "/评论导出")
+        default_out = str(Path(self.cfg.get("out_dir")
+                               or output_mod.default_out_dir()) / "评论导出")
         self.out_row = PathRow(None, default_out)
         form.addRow("输出目录", self.out_row)
 

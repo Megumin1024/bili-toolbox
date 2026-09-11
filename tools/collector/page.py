@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QApplicat
 
 from app.task_page import TaskPage
 from app.widgets import PathRow, StatusPill, card, h2, muted
+from core import output as output_mod
 
 from .comparison import METRICS, STATE_LABELS, SessionComparison, sort_rows
 from .comparison_chart import ComparisonChart
@@ -266,7 +267,8 @@ class CollectorPage(TaskPage):
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(10)
-        default_out = str((self.cfg.get("out_dir") or ".") + "/采集导出")
+        default_out = str(Path(self.cfg.get("out_dir")
+                               or output_mod.default_out_dir()) / "采集导出")
         self.out_row = PathRow(None, default_out)
         form.addRow("输出目录", self.out_row)
         self.sleep_edit = QLineEdit("0.3")

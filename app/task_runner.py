@@ -5,6 +5,8 @@ import threading
 
 from PySide6.QtCore import QThread, Signal
 
+from core.redact import sanitize_text
+
 
 class TaskRunner(QThread):
     progress = Signal(dict)
@@ -28,4 +30,5 @@ class TaskRunner(QThread):
             result = self._fn(**self._kwargs)
             self.finished_ok.emit(result)
         except Exception as exc:  # noqa: BLE001 - 统一兜底进 GUI
-            self.failed.emit(f"{type(exc).__name__}: {exc}")
+            # 异常原文会直接进 GUI 日志面板，出口处强制脱敏
+            self.failed.emit(f"{type(exc).__name__}: {sanitize_text(exc)}")

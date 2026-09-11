@@ -12,6 +12,20 @@ import time
 VALID_SCHEMES = ("http", "https", "socks5", "socks5h", "socks4")
 
 
+def redact_url(url):
+    """去掉 URL 里的账号密码，只保留 scheme://host:port。
+
+    代理串（http://user:pass@host:port）会出现在异常消息与日志里，
+    这份脱敏供日志/异常路径统一复用；无 scheme 时退化为只取 @ 之后的部分。
+    """
+    if not url:
+        return url
+    scheme, sep, rest = url.partition("://")
+    if not sep:
+        return url.split("@")[-1]
+    return f"{scheme}://{rest.split('@')[-1]}"
+
+
 class ProxyEntry:
     __slots__ = ("url", "failures", "failed_until", "total_ok", "total_fail")
 
@@ -30,9 +44,7 @@ class ProxyEntry:
         if self.url is None:
             return "直连"
         # 隐藏代理 URL 中的用户名密码
-        rest = self.url.split("@")[-1]
-        scheme = self.url.split("://", 1)[0]
-        return f"{scheme}://{rest}"
+        return redact_url(self.url)
 
 
 class ProxyPool:
@@ -49,7 +61,8 @@ class ProxyPool:
             else:
                 scheme = item.split("://", 1)[0].lower()
                 if scheme not in VALID_SCHEMES:
-                    raise ValueError(f"不支持的代理协议: {item}（支持 {VALID_SCHEMES}）")
+                    raise ValueError(f"不支持的代理协议: {redact_url(item)}"
+                                     f"（支持 {VALID_SCHEMES}）")
                 url = item
             if not any(e.url == url for e in self.entries):
                 self.entries.append(ProxyEntry(url))

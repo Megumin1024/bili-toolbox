@@ -52,8 +52,9 @@ def main():
     from core import config, diagnostics, output, session
 
     cfg = config.load()
-    if not cfg.get("out_dir"):
-        cfg["out_dir"] = str(output.default_out_dir())
+    # 旧版打包会把 <exe 目录>/导出 写进配置；那个位置会被重装/重建清空，
+    # 按"未设置"重新解析。用户自己挑到别处的路径不动。
+    cfg["out_dir"] = output.migrate_out_dir(cfg.get("out_dir"))
     session.configure(proxy_spec=cfg.get("proxy_spec") or None,
                       transport=cfg.get("transport") or "auto",
                       cookie_path=config.COOKIE_FILE)

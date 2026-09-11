@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QFileDialog,
 from app.task_runner import TaskRunner
 from app.task_page import TaskPage
 from app.widgets import PathRow, ProgressBlock, ResultCard, card, h2, muted
-from core import diagnostics, task_history
+from core import diagnostics, output as output_mod, task_history
 
 from .core import fingerprint_file, validate_inputs
 from .pipeline import run_pipeline
@@ -125,7 +125,8 @@ class DataCheckPage(TaskPage):
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(10)
-        default_out = str(Path(self.cfg.get("out_dir") or ".") / "数据检查")
+        default_out = str(Path(self.cfg.get("out_dir")
+                               or output_mod.default_out_dir()) / "数据检查")
         self.out_row = PathRow(None, default_out)
         form.addRow("报告输出目录", self.out_row)
         self.params_lay.addLayout(form)

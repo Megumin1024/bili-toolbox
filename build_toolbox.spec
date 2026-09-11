@@ -13,6 +13,8 @@ a = Analysis(
     hiddenimports=[
         'tools.comments.reply_pb2',
         'tools.comments.reply_pb2_grpc',
+        # 弹幕工具用 protobuf 解析二进制分段（无 service，故无 _pb2_grpc）
+        'tools.danmaku.danmaku_pb2',
     ],
     hookspath=[],
     hooksconfig={},

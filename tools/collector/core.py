@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import session
+from core.cancel import TaskCancelledError, wait as wait_or_cancel
 from core.risk import RiskChallengeError  # noqa: F401  供 pipeline 引用
 from core import xlsx as xlsx_mod
 
@@ -24,9 +25,9 @@ except ImportError:  # noqa: F841
 
 # ============================ 采集 ============================
 
-def fetch_view(bvid):
+def fetch_view(bvid, cancel=None):
     d = session.http_get_json(
-        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}")
+        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}", cancel=cancel)
     if d.get("code") != 0:
         raise ValueError(f"{bvid}: code={d.get('code')} {d.get('message')}")
     v = d["data"]
@@ -48,14 +49,18 @@ def fetch_view(bvid):
 
 
 def collect_snapshot(bvids, sleep=0.3, progress=None, cancel=None, snapshot_path=None):
-    """逐视频采集一份快照；返回 (成功列表, 失败列表[(bvid, err)])。"""
+    """逐视频采集一份快照；返回 (成功列表, 失败列表[(bvid, err)])。
+
+    cancel 会一路透传到请求内部：不仅在本循环间生效，也能打断 BiliClient 的
+    退避等待。取消属主动行为，不计入失败列表——干净收尾并返回已采到的部分。
+    """
     ok, fail = [], []
     total = len(bvids)
     for i, bv in enumerate(bvids, 1):
         if cancel and cancel():
             break
         try:
-            snap = fetch_view(bv)
+            snap = fetch_view(bv, cancel=cancel)
             ok.append(snap)
             if snapshot_path:
                 with open(snapshot_path, "a", encoding="utf-8") as fh:
@@ -63,12 +68,15 @@ def collect_snapshot(bvids, sleep=0.3, progress=None, cancel=None, snapshot_path
         except RiskChallengeError as e:
             e.resume_index = i - 1  # 断点：下一轮从此视频续采（0-based）
             raise
+        except TaskCancelledError:
+            break                   # 退避途中被取消：不是失败，直接收尾
         except Exception as e:  # noqa: BLE001
             fail.append((bv, str(e)[:80]))
         if progress:
             progress(done=i, total=total, ok=len(ok), fail=len(fail),
                      text=f"采集 {i}/{total}: {bv}（成功{len(ok)} 失败{len(fail)}）")
-        time.sleep(sleep + random.random() * 0.15)
+        if not wait_or_cancel(sleep + random.random() * 0.15, cancel):
+            break                   # 视频间隔也可被打断
     return ok, fail
 
 

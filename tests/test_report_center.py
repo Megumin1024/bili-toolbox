@@ -601,5 +601,27 @@ class ReportCenterPageTests(unittest.TestCase):
         temp.cleanup()
 
 
+def tearDownModule():
+    """释放本模块创建的页面，避免 Qt 原生对象堆积到解释器退出。"""
+    try:
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+        from tools.report_center.page import ReportCenterPage
+    except ImportError:
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    pages = [widget for widget in QApplication.allWidgets()
+             if isinstance(widget, ReportCenterPage)]
+    for page in pages:
+        page.on_app_close()
+        page.close()
+        page.deleteLater()
+    app.processEvents()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+
+
 if __name__ == "__main__":
     unittest.main()

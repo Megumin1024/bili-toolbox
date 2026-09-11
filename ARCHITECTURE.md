@@ -5,19 +5,26 @@
 ```text
 main.py
   └─ app/main_window.py
-       ├─ app/theme.py / app/widgets.py / app/task_page.py
-       └─ tools/__init__.py
-            ├─ tools/comments/page.py      ─┐
-            ├─ tools/collector/page.py     ├─ 各自的 pipeline.py / core.py
-            └─ tools/monitor/page.py       ─┘
+       ├─ app/theme.py / app/widgets.py / app/task_page.py / app/task_runner.py
+       └─ tools/__init__.py                          ← ToolSpec 注册表（7 个工具）
+            ├─ tools/comments/page.py        ─┐
+            ├─ tools/collector/page.py        │
+            ├─ tools/data_check/page.py       ├─ 各自的 pipeline.py / core.py
+            ├─ tools/report_center/page.py    │
+            ├─ tools/user_dynamics/page.py    │
+            ├─ tools/danmaku/page.py         ─┘
+            └─ tools/monitor/page.py
                          │
                          ├─ tools/monitor/server.py → core/
                          └─ tools/monitor/static/index.html
 
-core/
-  ├─ config.py / session.py / proxy.py / risk.py
-  ├─ links.py / client.py
-  └─ output.py / xlsx.py
+core/                                    ← 不允许 import app/ 或 tools/
+  ├─ 网络通道：session.py / client.py / transport.py
+  │            proxy.py / fingerprint.py / activation.py / wbi.py
+  ├─ 可靠性内核：net_errors.py / backoff.py / cancel.py / gate.py
+  │              risk.py / redact.py
+  ├─ 配置与状态：config.py / task_history.py / task_presets.py
+  └─ 输出与文本：output.py / xlsx.py / text.py / links.py / diagnostics.py
 ```
 
 ## 依赖方向
@@ -46,6 +53,9 @@ core/
 - 监控 HTTP API 的响应字段、状态和历史数据结构。
 - `main.py` 中的冻结 DLL 搜索路径处理。
 - `build_toolbox.spec` 的静态资源和 protobuf 隐式导入。
+- `core/net_errors.py` 的 `ErrorKind` 分类口径——所有重试/退避/熔断判断都挂在它上面，改它会牵动整个网络层。
+- `core/gate.py` 的 `shared_gate()` 进程级单例语义——session 单例与监控自建 client 共用同一份背压。
+- 二进制通道（`get_bytes` / `fetch_bytes`）与 JSON 通道共用同一套闸门、重试、统计和探针回报。
 
 ## 修改范围判断
 
@@ -56,7 +66,7 @@ core/
 | 监控指标 | `server.py`、静态页面和契约测试 | 服务端与前端字段同时兼容 |
 | 配置字段 | 配置读写和设置页 | 旧配置启动、保存、重启恢复 |
 | 依赖/打包 | `requirements.txt`、`main.py`、spec、环境脚本 | 官方 Python、干净 PATH、EXE 启动 |
-| 共享 `core/` | 只有明确授权时 | 三个现有工具的回归测试和保护性 diff |
+| 共享 `core/` | 只有明确授权时 | 全部 7 个工具的回归测试和保护性 diff；`scripts/check_boundaries.py` |
 
 ## 防止功能杂糅的规则
 

@@ -4,9 +4,11 @@
 from app.registry import ToolSpec
 from .collector.page import CollectorPage
 from .comments.page import CommentsPage
+from .danmaku.page import DanmakuPage
 from .data_check.page import DataCheckPage
 from .monitor.page import MonitorPage
 from .report_center.page import ReportCenterPage
+from .user_dynamics.page import UserDynamicsPage
 
 TOOLS = [
     ToolSpec(id="comments", name="评论抓取",
@@ -24,4 +26,10 @@ TOOLS = [
     ToolSpec(id="report_center", name="报告中心",
              subtitle="浏览、对比和导出本地评论/快照/监控历史",
              icon="fa5s.file-alt", factory=ReportCenterPage),
+    ToolSpec(id="user_dynamics", name="用户动态",
+             subtitle="输入 UID 抓取该用户的公开动态 → Excel",
+             icon="fa5s.user-circle", factory=UserDynamicsPage),
+    ToolSpec(id="danmaku", name="弹幕抓取",
+              subtitle="输入视频链接 · 抓取弹幕 → 热词/高频弹幕/热点分钟 + 密度分布 Excel（无需登录）",
+              icon="fa5s.comment-dots", factory=DanmakuPage),
 ]

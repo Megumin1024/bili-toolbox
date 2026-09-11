@@ -5,6 +5,24 @@
 
 ## [Unreleased]
 
+## [1.0.4] - 2026-09-11
+
+### 新增
+
+- **用户动态**：输入 UID 或空间链接，抓取该用户的公开动态（图文 / 转发 / 投稿），可设置页数上限与页间隔。游客态即可使用，无需登录。
+- **弹幕抓取**：输入视频链接抓取弹幕，可选择只抓指定分P或抓取全部分P，导出弹幕明细、密度分布 Excel 与原始 JSONL。游客态即可使用，无需登录。
+- **弹幕分析**：在弹幕抓取结果上追加「弹幕分析」工作表与一份 Markdown 报告，包含热词、高频弹幕、时间轴热点分钟、弹幕模式/弹幕池构成和发送时间跨度。纯本地统计，不产生任何额外网络请求。
+
+### 变更
+
+- 弹幕工具统一使用 `core/text.py` 作为分词正本（中文 2/3/4 字滑窗 n-gram + 停用词 + 长词抑制），词频口径为「出现在多少条弹幕里」，同一条内的重复不累加。`tools/comments/core.py` 中的历史私有分词实现保持不变，迁移单独处理。
+
+### 修复
+
+- 修复网络层在无 GUI 场景（脚本 / CLI）下冷启动时的永久挂起。
+- 修复用户动态任务在 HTTP 层退避等待期间无法响应「取消」的问题，此前最坏需等待 90 秒。
+- **修复导出目录落在程序自身安装目录内的问题**：打包态此前把导出写到 exe 同级目录，重新打包（`--noconfirm` 会清空产物目录）时有连带删除用户导出文件的风险。现改为统一写入 `%USERPROFILE%\BiliToolbox\导出`，并在启动时把落在安装目录内的旧配置路径重新解析；用户自行选择的路径不受影响。
+
 ## [1.0.3] - 2026-09-10
 
 ### 修复
@@ -70,7 +88,8 @@
 
 - 单一 PyInstaller 配置（onedir，约 45MB）
 
-[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.4...HEAD
+[1.0.4]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.0...v1.0.1

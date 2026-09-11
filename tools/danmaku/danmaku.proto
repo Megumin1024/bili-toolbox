@@ -1,0 +1,47 @@
+// 弹幕分段接口的响应结构（x/v2/dm/web/seg.so）。
+//
+// 字段号与线格式不是抄文档来的，是对真实响应做 wire-format 遍历逐个核实的
+// （样本：cid 137649199 第 1 段，1410 条弹幕；见 tools/danmaku/core.py 的模块注释）。
+// 核实结论：
+//   1  id        varint   17 位十进制
+//   2  progress  varint   毫秒；缺省（=0）时不出现在线上，故解析时按 0 处理
+//   3  mode      varint   实测出现 1/4/5/7
+//   4  fontsize  varint   实测出现 18/25/28，不是固定值
+//   5  color     varint   0xRRGGBB，实测 27 种取值
+//   6  midHash   string   6~8 字符十六进制
+//   7  content   string   实测最长 171 字节
+//   8  ctime     varint   Unix 秒
+//   9  weight    varint   实测 9/10/11
+//   11 pool      varint   0=普通 1=字幕
+//   12 idStr     string   实测恒等于 str(id)（1410/1410）
+//   13 attr      varint   位标志；语义未经证实，本工具只原样导出，不解释
+//   26 oid       varint   等于该段的 cid
+//
+// 线上还存在 15/18/20/21/24/25/27 以及顶层的 4/5，语义未知，**故意不声明**：
+// protobuf 解析时会跳过未声明的字段，声明错类型反而会让整段解析失败。
+// 本工具只读不写，不做序列化，因此不存在丢字段的问题。
+syntax = "proto3";
+
+package bilibili.danmaku.v1;
+
+// 一条弹幕
+message DanmakuElem {
+  int64 id = 1;
+  int32 progress = 2;
+  int32 mode = 3;
+  int32 fontsize = 4;
+  uint32 color = 5;
+  string midHash = 6;
+  string content = 7;
+  int64 ctime = 8;
+  int32 weight = 9;
+  int32 pool = 11;
+  string idStr = 12;
+  int32 attr = 13;
+  int64 oid = 26;
+}
+
+// 一段（6 分钟）弹幕
+message DmSegMobileReply {
+  repeated DanmakuElem elems = 1;
+}
