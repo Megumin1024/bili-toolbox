@@ -41,10 +41,6 @@
 
 ![评论抓取](docs/screenshots/comments.png)
 
-**🧾 本地报告中心**
-
-![本地报告中心](docs/screenshots/report-center.png)
-
 **📈 监控仪表盘 · 精确数据**
 
 ![监控仪表盘](docs/screenshots/dashboard.png)

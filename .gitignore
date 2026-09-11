@@ -16,4 +16,3 @@ AGENTS.md
 docs/screenshots/*.png
 !docs/screenshots/comments.png
 !docs/screenshots/dashboard.png
-!docs/screenshots/report-center.png
