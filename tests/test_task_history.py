@@ -557,6 +557,9 @@ class TaskPageHookTests(unittest.TestCase):
         page.link_edit = _Field()
         page.out_row = _Field()
         page.sleep_edit = _Field()
+        # 预算输入：新增控件随 fake 清单同步
+        page.max_requests_edit = _Field()
+        page.max_minutes_edit = _Field()
         page.tls_check = _Field()
         page.auto_open = _Field()
         params = {
@@ -569,6 +572,9 @@ class TaskPageHookTests(unittest.TestCase):
         self.assertEqual(page.link_edit.value, "BV1Demo")
         self.assertEqual(page.out_row.value, "D:\\export")
         self.assertEqual(page.sleep_edit.value, "0.4")
+        # 旧历史记录没有预算字段：回填默认值而不是清空
+        self.assertEqual(page.max_requests_edit.value, "20000")
+        self.assertEqual(page.max_minutes_edit.value, "240")
         self.assertTrue(page.tls_check.value)
         self.assertFalse(page.auto_open.value)
 

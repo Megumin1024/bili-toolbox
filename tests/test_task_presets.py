@@ -220,11 +220,16 @@ class TaskPresetPageTests(unittest.TestCase):
         page.link_edit = _TextField("")
         page.out_row = _PathField("")
         page.sleep_edit = _TextField("0.4")
+        # 预算输入：新增控件随 fake 清单同步（默认值与 core.budget 一致）；
+        # 旧预设没有预算字段时 apply 回填默认值。
+        page.max_requests_edit = _TextField("20000")
+        page.max_minutes_edit = _TextField("240")
         page.tls_check = _CheckField(True)
         page.auto_open = _CheckField(False)
         params = page.collect_preset_params()
         self.assertEqual(params, {
             "url": "", "out_dir": "", "sleep": 0.4,
+            "max_requests": 20000, "max_minutes": 240,
             "use_tls_grpc": True, "open_result": False,
         })
         page.apply_preset_params({
@@ -234,6 +239,8 @@ class TaskPresetPageTests(unittest.TestCase):
         self.assertEqual(page.link_edit.value, "BV1Demo")
         self.assertEqual(page.out_row.value(), r"D:\export")
         self.assertEqual(page.sleep_edit.value, "0.8")
+        self.assertEqual(page.max_requests_edit.value, "20000")
+        self.assertEqual(page.max_minutes_edit.value, "240")
         self.assertFalse(page.tls_check.value)
         self.assertTrue(page.auto_open.value)
 
@@ -289,6 +296,9 @@ class TaskPresetPageTests(unittest.TestCase):
         page.link_edit = _TextField()
         page.out_row = _PathField()
         page.sleep_edit = _TextField()
+        # 预算输入：新增控件随 fake 清单同步
+        page.max_requests_edit = _TextField()
+        page.max_minutes_edit = _TextField()
         page.tls_check = _CheckField()
         page.auto_open = _CheckField()
         with patch.object(TaskPage, "on_start") as start, \

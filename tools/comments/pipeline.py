@@ -3,12 +3,21 @@
 
 框架无关（progress(**kw)/cancel() 注入），GUI 与 CLI 共用；HTTP 元信息请求
 走 core.session 风控栈，gRPC metadata 注入预热 cookie。
+
+max_requests / max_minutes 为任务预算（core.budget.TaskBudget，每次任务新
+建），强制点与记账都在 gRPC 通道入口（tools.comments.core.Crawler._call），
+与 core.client 的 attempt==0 同一口径；None = 该项无上限，旧调用行为不变。
+到限按正常完成收尾：已抓评论照常分析导出，stats 记
+stopped_reason="budget_reached"，断点保留，重跑从断点续传。链接解析、动态
+元信息与 buvid/bili_ticket 预热合计至多几条请求，且入口 links.*（core/）不
+暴露 budget 参数，故不记账——预算管住的是高速率的 gRPC 评论通道。
 """
 import json
 import os
 from pathlib import Path
 
 from core import links, risk, session
+from core.budget import TaskBudget
 from core.risk import RiskChallengeError
 from core.session import http_get_json  # noqa: F401  兼容旧引用
 
@@ -24,12 +33,21 @@ def _raise_on_crawl_error(stats):
 
 
 def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
-                 cancel=None, progress=None, open_result=False):
+                 cancel=None, progress=None, open_result=False,
+                 max_requests=None, max_minutes=None):
     """完整流水线。返回结果 dict。"""
 
     def p(**kw):
         if progress:
             progress(**kw)
+
+    budget = None
+    if max_requests is not None or max_minutes is not None:
+        # 未提供任何预算参数时保持 budget=None：整条请求链的调用与引入预算前
+        # 逐字节一致（旧签名、旧测试不受影响）。
+        budget = TaskBudget(
+            max_requests=max_requests,
+            max_seconds=(max_minutes * 60) if max_minutes is not None else None)
 
     def parse_with_recovery():
         try:
@@ -73,7 +91,8 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
     p(text=f"开始抓取评论（{channel_desc}，oid={oid}）…")
     crawler = core.Crawler(oid, rtype, out_path, sleep=sleep, max_pages=max_pages,
                            progress=p, cancel=lambda: bool(cancel and cancel()),
-                           metadata=metadata, use_tls_grpc=use_tls_grpc)
+                           metadata=metadata, use_tls_grpc=use_tls_grpc,
+                           budget=budget)
     stats = crawler.crawl()
     _raise_on_crawl_error(stats)
     rows = []
@@ -88,7 +107,9 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
             except ValueError:
                 continue
     p(text=f"抓取完成: 共 {len(rows):,} 条（抓取请求 {stats['pages']} 页"
-           f"{'，已取消/限页' if stats.get('aborted') else ''}），正在分析…")
+           f"{'，已取消/限页' if stats.get('aborted') else ''}"
+           f"{'，已达上限安全停止' if stats.get('stopped_reason') == 'budget_reached' else ''}）"
+           f"，正在分析…")
 
     report, kpi = core.analyze(rows, meta)
     report_path = Path(out_path) / "分析报告.md"

@@ -4,6 +4,8 @@
 - Crawler 的 gRPC metadata 由 core.session.grpc_metadata() 注入（预热 cookie
   伪装）
 - 可选实验通道 grpc_tls（Chrome TLS 指纹 gRPC），失败自动回退 grpcio
+- 可选任务预算（core.budget.TaskBudget）：gRPC 每页业务请求记账一次，到限按
+  正常完成收尾，断点保留可续传
 - Excel 导出基于 core.xlsx 共享基建
 - 本模块自建 gRPC 通道、不走 BiliClient，因此**自己过全局闸门**
   （core.gate.shared_gate）：这是全项目请求速率最高的一条流。
@@ -19,6 +21,7 @@ from pathlib import Path
 import grpc
 
 from core import xlsx as xlsx_mod
+from core.budget import BudgetExhaustedError
 from core.cancel import wait as cancel_wait
 from core.gate import shared_gate
 
@@ -70,9 +73,13 @@ def norm_grpc(r, root_rpid=None):
 class Crawler:
     """全量评论抓取（gRPC 游客通道，可取消、可限页、断点续传）。"""
 
+    # 类级缺省：让绕过 __init__ 的构造方式（离线测试用 __new__ 手工装配）
+    # 读 budget 时也能安全拿到 None，不改变任何真实构造路径。
+    budget = None
+
     def __init__(self, oid, rtype, out_dir, sleep=0.2, max_pages=0,
                  progress=None, cancel=None, metadata=None, use_tls_grpc=False,
-                 gate=None, sleeper=None):
+                 gate=None, sleeper=None, budget=None):
         self.oid, self.rtype = int(oid), int(rtype)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -82,16 +89,20 @@ class Crawler:
         self.max_pages = int(max_pages or 0)  # 0=不限
         self.progress = progress or (lambda **k: None)
         self.cancel = cancel or (lambda: False)
+        # 任务预算（core.budget.TaskBudget），None = 无上限：整条请求链的调用
+        # 与没有预算时逐字节一致。
+        self.budget = budget
         # 全局限速 + 熔断：本模块自建 gRPC 通道绕过 BiliClient，须自己过闸门
         # 才能与其它工具共享同一份背压（生产路径共用进程级单例）。
         self.gate = shared_gate() if gate is None else gate
         self.out_path = self.out_dir / "comments.jsonl"
         self.ckpt_path = self.out_dir / "checkpoint.json"
         self.ckpt = self._load_ckpt()
-        # ckpt 中的字段是持久化的上次中断标记；以下两个字段只表示本次 crawl()。
+        # ckpt 中的字段是持久化的上次中断标记；以下字段只表示本次 crawl()。
         self._run_aborted = False
         self._run_cancelled = False
         self._run_error = None
+        self._run_budget_stopped = False
         self.channel = grpc.secure_channel(GRPC_HOST, grpc.ssl_channel_credentials())
         self.stub = reply_pb2_grpc.ReplyStub(self.channel)
         self.md = metadata or [("user-agent", UA_APP)]
@@ -130,6 +141,13 @@ class Crawler:
         for i in range(tries):
             if self.cancel():
                 raise TaskCancelled()
+            if self.budget is not None and i == 0:
+                # 预算强制点：cancel 之后、gate.acquire 之前；检查通过立即计数
+                # （与 core.client._request 的 attempt==0 同一口径）。一次 _call
+                # 调用 = 一页业务请求，内部退避重试不重复检查/记账；到限抛
+                # BudgetExhaustedError，不被重试/退避逻辑捕获，不改变 gate 状态。
+                self.budget.check_request()
+                self.budget.observe_request()
             if not self.gate.acquire(self.cancel, on_wait=self._log_gate_wait):
                 raise TaskCancelled()
             try:
@@ -178,6 +196,7 @@ class Crawler:
         self._run_aborted = False
         self._run_cancelled = False
         self._run_error = None
+        self._run_budget_stopped = False
         self._save_ckpt()
 
     def _mark_aborted(self, cancelled=False, error=None):
@@ -189,17 +208,33 @@ class Crawler:
         self.ckpt["cancelled"] = bool(cancelled)
         self._save_ckpt()
 
+    def _mark_budget_stopped(self):
+        """预算到限：按正常完成收尾——不设 aborted/cancelled 标记，断点照常
+        保留（下次运行从当前游标续传）。取消优先于预算，取消路径不会走到这里。
+        """
+        self._run_budget_stopped = True
+        if self.budget is not None:
+            done = self.ckpt["main_done"] + self.ckpt["sub_done"]
+            self.progress(level="warn",
+                          text=f"已达预算上限（{self.budget.reason()}），"
+                               f"安全停止：已抓 {done:,} 条评论，"
+                               "断点已保留，可续传")
+        self._save_ckpt()
+
     def crawl(self):
         """执行两阶段抓取，返回统计 dict。中断(取消/限页)时标记 aborted。"""
         # 上一次取消/限页/异常只属于旧运行，不能阻止本次从断点继续。
         self._run_aborted = False
         self._run_cancelled = False
         self._run_error = None
+        self._run_budget_stopped = False
         self.ckpt["aborted"] = False
         self.ckpt["cancelled"] = False
         with open(self.out_path, "a", encoding="utf-8") as out:
             self._phase_main(out)
-            if not self._run_aborted:
+            # 预算到限与中断同样收尾：不再进入下一阶段（否则楼中楼首个请求
+            # 会再次触发预算检查，把同一条警告刷两遍）。
+            if not self._run_aborted and not self._run_budget_stopped:
                 self._phase_sub(out)
         self.channel.close()
         self._save_ckpt()
@@ -211,12 +246,17 @@ class Crawler:
             status = "interrupted"
         else:
             status = "completed"
-        return {"main": self.ckpt["main_done"], "sub": self.ckpt["sub_done"],
-                "pages": self.ckpt["pages"],
-                "aborted": self._run_aborted,
-                "cancelled": self._run_cancelled,
-                "status": status,
-                "error": self._run_error}
+        stats = {"main": self.ckpt["main_done"], "sub": self.ckpt["sub_done"],
+                 "pages": self.ckpt["pages"],
+                 "aborted": self._run_aborted,
+                 "cancelled": self._run_cancelled,
+                 "status": status,
+                 "error": self._run_error}
+        if self._run_budget_stopped:
+            # 只在真的预算到限时才出现该键：budget=None 路径的返回结构与
+            # 引入预算前逐字节一致。
+            stats["stopped_reason"] = "budget_reached"
+        return stats
 
     def _phase_main(self, out):
         ck = self.ckpt
@@ -234,6 +274,9 @@ class Crawler:
                 resp = self._call(self.stub.MainList, req)
             except TaskCancelled:
                 self._mark_aborted(cancelled=True)
+                return
+            except BudgetExhaustedError:
+                self._mark_budget_stopped()
                 return
             except RuntimeError as e:
                 self.progress(level="error", text=f"主楼阶段终止: {e}")
@@ -283,6 +326,9 @@ class Crawler:
                     resp = self._call(self.stub.DetailList, req)
                 except TaskCancelled:
                     self._mark_aborted(cancelled=True)
+                    return
+                except BudgetExhaustedError:
+                    self._mark_budget_stopped()
                     return
                 except RuntimeError as e:
                     self.progress(level="error", text=f"楼中楼 {rpid} 终止: {e}")
