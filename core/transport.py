@@ -16,14 +16,12 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from pathlib import Path
 
 from .activation import gen_uuid_infoc
 from .backoff import parse_retry_after
 from .config import atomic_write_text
-from .net_errors import (ErrorKind, RATE_LIMIT_API_CODES, RATE_LIMIT_HTTP_STATUS,
-                         RISK_API_CODES, RISK_HTTP_STATUS, classify,
-                         describe as describe_error)
+from .net_errors import (ErrorKind, RATE_LIMIT_HTTP_STATUS, RISK_HTTP_STATUS,
+                         classify, describe as describe_error)
 from .redact import sanitize_text
 
 HOME_URL = "https://www.bilibili.com/"
@@ -242,8 +240,8 @@ def bootstrap_credentials(transport, identity=None, cookie_store=None, force=Fal
         if spi.get("b_3"):
             cookies["buvid3"], cookies["buvid4"] = spi["b_3"], spi["b_4"]
     except Exception as exc:  # noqa: BLE001
-        _log(f"[cred] spi 获取失败({getattr(transport, 'name', '?')}): {exc}，"
-             f"自生成 buvid3 兜底")
+        _log(f"[cred] spi 获取失败({getattr(transport, 'name', '?')}): "
+             f"{sanitize_text(str(exc))}，自生成 buvid3 兜底")
     if not cookies.get("buvid3"):
         cookies["buvid3"] = gen_uuid_infoc()  # 格式合法即可用；经 ExClimbWuzhi 激活后更稳
     try:
@@ -257,7 +255,7 @@ def bootstrap_credentials(transport, identity=None, cookie_store=None, force=Fal
             cookies["bili_ticket"] = ticket
             cookies["bili_ticket_expires"] = str(ts + 259200)
     except Exception as exc:  # noqa: BLE001
-        _log(f"[cred] bili_ticket 签发失败: {exc}")
+        _log(f"[cred] bili_ticket 签发失败: {sanitize_text(str(exc))}")
     try:
         transport.get_json(HOME_URL)  # 首页补 b_nut 等基础 cookie
     except Exception:  # noqa: BLE001

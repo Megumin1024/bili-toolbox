@@ -46,6 +46,41 @@ _WINDOWS_PATH_RE = re.compile(
 
 _MAX_LENGTH = 16000
 
+# ---------------- 持久化层共享模式（task_history 复用） ----------------
+# 展示脱敏（sanitize_text，「宁可多糊」）与持久化边界（task_history 的
+# 「敏感即整条丢弃」）是两层判定：键集与值形态刻意不同——
+#   passwd/secret/api-key/proxy-account 只在持久化侧，set-cookie/buvid/
+#   w_rid/bili_ticket 等只在展示侧，任意一侧取并集或交集都会改变匹配行为。
+# 因此这里只收拢**定义位置**（单一来源），下列正则串与 task_history 原定义
+# 逐字节一致，不改任何一侧的匹配语义；test_redact / test_task_history /
+# test_task_presets 是行为锁。展示脱敏仍只走本模块私有的 _SECRET_RE 等。
+
+#: Bearer 规则：「Bearer + 空格/制表符 + 非空凭据」即视为敏感。
+BEARER_TOKEN_RE = re.compile(r"(?i)(?<![a-z0-9_])bearer[ \t]+\S+")
+
+#: 持久化键名判定：命中即视为敏感键（不落盘）。
+SENSITIVE_KEY_RE = re.compile(
+    r"(?:cookie|sessdata|bili[_ -]?jct|token|authorization|bearer|csrf|"
+    r"password|passwd|secret|api[_ -]?key|access[_ -]?key|"
+    r"proxy[_ -]?(?:account|user(?:name)?|pass(?:word)?))",
+    re.IGNORECASE,
+)
+
+#: 持久化文本判定：「敏感键 + 分隔符 + 值」形态（值支持引号与转义）。
+SENSITIVE_TEXT_RE = re.compile(
+    r"(?ix)"
+    r"(?<![a-z0-9_])['\"]?(?:cookie|sessdata|bili[_ -]?jct|"
+    r"authorization|bearer|token|access[_ -]?token|refresh[_ -]?token|csrf|"
+    r"password|passwd|secret|api[_ -]?key|"
+    r"proxy[_ -]?(?:account|user(?:name)?|pass(?:word)?))['\"]?"
+    r"\s*(?:=|:|：)\s*"
+    r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|"
+    r"(?:bearer\s+)?[^\s,;，；\]\[()<>}\"']+)"
+)
+
+#: 持久化 URL 判定：任意 scheme（展示层的 _URL_RE 只认 http/socks5，范围不同）。
+SENSITIVE_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
+
 
 def sanitize_text(value):
     """脱敏错误详情，不展示凭据、完整 URL、IP 或本地完整路径。"""

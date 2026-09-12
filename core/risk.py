@@ -10,6 +10,8 @@ import threading
 import urllib.parse
 import webbrowser
 
+from .redact import sanitize_text
+
 GAIA_REGISTER_URL = "https://api.bilibili.com/x/gaia-vgate/v1/register"
 GAIA_VALIDATE_URL = "https://api.bilibili.com/x/gaia-vgate/v1/validate"
 
@@ -38,7 +40,7 @@ def gaia_register(v_voucher):
                     "challenge": gd["challenge"]}
         _log(f"[risk] register 失败: code={d.get('code')} {str(d.get('message'))[:60]}")
     except Exception as exc:  # noqa: BLE001
-        _log(f"[risk] register 异常: {exc}")
+        _log(f"[risk] register 异常: {sanitize_text(str(exc))}")
     return None
 
 
@@ -52,7 +54,7 @@ def gaia_validate(token, challenge, validate, seccode):
         grisk = (d.get("data") or {}).get("grisk_id")
         return grisk or None
     except Exception as exc:  # noqa: BLE001
-        _log(f"[risk] validate 异常: {exc}")
+        _log(f"[risk] validate 异常: {sanitize_text(str(exc))}")
         return None
 
 

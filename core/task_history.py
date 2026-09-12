@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import tempfile
 import uuid
@@ -12,6 +13,10 @@ from pathlib import Path
 from urllib.parse import parse_qsl, urlsplit
 
 from . import config, diagnostics
+# 脱敏模式单一来源在 core.redact（行为等价合并，正则串与原定义逐字节一致）；
+# diagnostics 只是有意保留的 sanitize_text 兼容入口，模式不从这里走。
+from .redact import (BEARER_TOKEN_RE, SENSITIVE_KEY_RE, SENSITIVE_TEXT_RE,
+                     SENSITIVE_URL_RE)
 
 
 SCHEMA_VERSION = 1
@@ -25,25 +30,7 @@ _REQUIRED_FIELDS = {
     "error",
 }
 _ALLOWED_STATUSES = {"running", *TERMINAL_STATUSES}
-_SENSITIVE_KEY_RE = re.compile(
-    r"(?:cookie|sessdata|bili[_ -]?jct|token|authorization|bearer|csrf|"
-    r"password|passwd|secret|api[_ -]?key|access[_ -]?key|"
-    r"proxy[_ -]?(?:account|user(?:name)?|pass(?:word)?))",
-    re.IGNORECASE,
-)
-_SENSITIVE_QUERY_KEYS = _SENSITIVE_KEY_RE
-_SENSITIVE_TEXT_RE = re.compile(
-    r"(?ix)"
-    r"(?<![a-z0-9_])['\"]?(?:cookie|sessdata|bili[_ -]?jct|"
-    r"authorization|bearer|token|access[_ -]?token|refresh[_ -]?token|csrf|"
-    r"password|passwd|secret|api[_ -]?key|"
-    r"proxy[_ -]?(?:account|user(?:name)?|pass(?:word)?))['\"]?"
-    r"\s*(?:=|:|：)\s*"
-    r"(?:\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|"
-    r"(?:bearer\s+)?[^\s,;，；\]\[()<>}\"']+)"
-)
-_BEARER_TOKEN_RE = re.compile(r"(?i)(?<![a-z0-9_])bearer[ \t]+\S+")
-_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
+_SENSITIVE_QUERY_KEYS = SENSITIVE_KEY_RE
 
 
 @dataclass(frozen=True)
@@ -102,7 +89,7 @@ def _sensitive_url(value):
 
 def _key_is_sensitive(key, proxy_context=False):
     text = str(key or "")
-    if _SENSITIVE_KEY_RE.search(text):
+    if SENSITIVE_KEY_RE.search(text):
         return True
     normalized = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return proxy_context and normalized in {
@@ -128,8 +115,8 @@ def contains_sensitive_text(value, proxy_context=False):
     if not isinstance(value, str):
         return False
     return bool(
-        _SENSITIVE_TEXT_RE.search(value)
-        or _BEARER_TOKEN_RE.search(value)
+        SENSITIVE_TEXT_RE.search(value)
+        or BEARER_TOKEN_RE.search(value)
         or _sensitive_url(value)
     )
 
@@ -157,13 +144,13 @@ def _prepare_value(value, key=None, proxy_context=False):
 def _redact_persistent_text(value):
     """先走现有错误脱敏，再兜底移除本模块识别到的敏感表达式。"""
     text = diagnostics.sanitize_text(value)
-    text = _SENSITIVE_TEXT_RE.sub("[已脱敏]", text)
-    text = _BEARER_TOKEN_RE.sub("[已脱敏]", text)
+    text = SENSITIVE_TEXT_RE.sub("[已脱敏]", text)
+    text = BEARER_TOKEN_RE.sub("[已脱敏]", text)
 
     def redact_url(match):
         return "[网络地址已脱敏]" if _sensitive_url(match.group(0)) else match.group(0)
 
-    return _URL_RE.sub(redact_url, text)
+    return SENSITIVE_URL_RE.sub(redact_url, text)
 
 
 def prepare_reusable_params(params):
@@ -302,6 +289,7 @@ def save_history(records):
             temp_path = Path(handle.name)
             json.dump(payload, handle, ensure_ascii=False, indent=2)
             handle.flush()
+            os.fsync(handle.fileno())  # 对齐 task_presets.save_presets 范式
         temp_path.replace(path)
         return True
     except (OSError, TypeError, ValueError):

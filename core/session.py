@@ -17,9 +17,9 @@ import urllib.parse
 
 from .client import BiliClient
 from .proxy import ProxyPool
+from .redact import sanitize_text
 from .risk import RiskChallengeError
-from .transport import (BiliApiError, BiliConnectionError, BiliRateLimitError,
-                        RiskBlocked, RiskVoucher, TransportError, LOG as _TLOG)
+from .transport import RiskVoucher, TransportError
 
 UA_APP = "Mozilla/5.0 BiliDroid/8.16.0 (bbcall@126.com)"
 
@@ -166,7 +166,8 @@ def ensure_ready():
     try:
         client._get_transport()
     except Exception as exc:  # noqa: BLE001
-        log(f"[cred] 凭证预热失败（不阻塞，接口请求仍会尝试）: {exc}")
+        log(f"[cred] 凭证预热失败（不阻塞，接口请求仍会尝试）: "
+            f"{sanitize_text(str(exc))}")
     return client.cookie_header()
 
 
@@ -185,4 +186,4 @@ def info():
     try:
         return get_client().info()
     except Exception as exc:  # noqa: BLE001
-        return {"error": str(exc)}
+        return {"error": sanitize_text(str(exc))}
