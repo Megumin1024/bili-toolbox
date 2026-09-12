@@ -426,9 +426,11 @@ def analyze(rows, meta):
         "coverage": f"{n / claimed * 100:.1f}%" if claimed else "-",
         "main": len(mains), "sub": len(subs), "users": len(mids),
         "per_user": f"{n / max(len(mids), 1):.2f}",
-        "vip_pct": f"{vip / n * 100:.1f}%", "zero_like_pct": f"{zero_like / n * 100:.1f}%",
+        # 0 行评论（如启动即取消）也要能出报告：n=0 的占比口径降级为 "-"
+        "vip_pct": f"{vip / n * 100:.1f}%" if n else "-",
+        "zero_like_pct": f"{zero_like / n * 100:.1f}%" if n else "-",
         "hours": f"{hours_span:.0f}", "build": build_cnt,
-        "build_pct": f"{build_cnt / n * 100:.1f}%",
+        "build_pct": f"{build_cnt / n * 100:.1f}%" if n else "-",
         "apology": apology, "defense": defense, "stop_pay": stop_pay,
         "genshin": genshin, "spam": spam,
         "by_day": sorted(by_day.items()), "by_hour": sorted(by_hour.items()),
@@ -485,6 +487,13 @@ def export_xlsx(rows, meta, kpi, out_path, progress=None):
     sw = xlsx_mod.SheetWriter(wb)
     W = 8
 
+    # 时间跨度说明行：0 行评论（无任何 ctime）时 min()/max() 不防空会直接
+    # ValueError，这里降级为 "-"（与 kpi 的占比兜底同口径）。
+    ts_points = [r["ctime"] for r in rows if r.get("ctime")]
+    ts_note = (f"{datetime.fromtimestamp(min(ts_points)):%m-%d %H:%M}"
+               f" ~ {datetime.fromtimestamp(max(ts_points)):%m-%d %H:%M}"
+               ) if ts_points else "-"
+
     # Sheet1 统计概览
     ws = wb.create_sheet("统计概览")
     sw.ws = ws
@@ -496,9 +505,7 @@ def export_xlsx(rows, meta, kpi, out_path, progress=None):
         ("实际抓取", n, f"覆盖率 {kpi['coverage']}（差额=已删除/折叠/不可见）"),
         ("主楼 / 楼中楼", f"{kpi['main']:,} / {kpi['sub']:,}", ""),
         ("独立用户", kpi["users"], f"人均 {kpi['per_user']} 条"),
-        ("时间跨度", f"{kpi['hours']} 小时",
-         f"{datetime.fromtimestamp(min(r['ctime'] for r in rows if r.get('ctime'))):%m-%d %H:%M}"
-         f" ~ {datetime.fromtimestamp(max(r['ctime'] for r in rows if r.get('ctime'))):%m-%d %H:%M}"),
+        ("时间跨度", f"{kpi['hours']} 小时", ts_note),
         ("0赞占比 / 大会员", f"{kpi['zero_like_pct']} / {kpi['vip_pct']}", "长尾结构与老玩家占比"),
         ("盖楼抗议（🧱🔨）", f"{kpi['build']:,}（{kpi['build_pct']}）", "复读接龙抗议规模"),
         ("要求道歉 / 护官反呛", f"{kpi['apology']:,} / {kpi['defense']:,}", "阵营对喷比值"),

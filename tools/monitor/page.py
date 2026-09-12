@@ -17,7 +17,6 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
 from app.task_page import PresetBar
 from app.widgets import (LogPanel, PageHeader, PathRow, StatusPill, card, h2,
                          muted)
-from core.config import COOKIE_FILE
 from core.output import app_base_dir
 
 from .alerts import AlertConfig, AlertEvent, AlertSession, milestones_text
@@ -495,10 +494,7 @@ class MonitorPage(QWidget):
         self.server = MonitorServer(
             bvid=m.group(0),
             interval=self.interval_spin.value(),
-            transport=self.transport_combo.currentData(),
-            proxy_spec=self.cfg.get("proxy_spec") or None,
             data_dir=self.data_row.value(),
-            cookie_path=COOKIE_FILE,
             log=self._log,
             event_callback=self._on_server_event,
             session_id=session_id)

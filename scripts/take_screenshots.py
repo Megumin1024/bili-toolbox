@@ -80,55 +80,63 @@ from app.main_window import MainWindow
 win = MainWindow(cfg)
 OUT.mkdir(parents=True, exist_ok=True)
 
+# 页面索引一律从注册表 TOOLS 的 id 派生：新增工具后无需逐处手改硬编码数字
+# （同一问题已真实踩过两次——第 8 个工具加入时 7→8 的索引全部失准）。
+# SETTINGS 页固定排在全部工具之后。
+from tools import TOOLS
+
+IDX = {spec.id: i for i, spec in enumerate(TOOLS)}
+SETTINGS_IDX = len(TOOLS)
+
 SHOTS = [
     # README 主截图：浅色 1440×900，覆盖待机与运行态
-    ("light", 0, (1440, 900), "comments.png", "idle"),
-    ("light", 1, (1440, 900), "collector.png", "running"),
-    ("light", 2, (1440, 900), "monitor.png", "running"),
-    ("light", 3, (1440, 900), "data-check.png", "idle"),
-    ("light", 4, (1440, 900), "report-center.png", "ready"),
-    ("dark", 4, (1440, 900), "report-center-dark.png", "ready"),
-    ("light", 4, (960, 640), "report-center-compact.png", "ready"),
-    ("dark", 3, (1440, 900), "data-check-dark.png", "issues"),
-    ("light", 3, (960, 640), "data-check-compact.png", "empty"),
-    ("dark", 3, (960, 640), "data-check-compact-dark.png", "issues"),
-    ("light", 3, (1440, 900), "data-check-repair-options.png", "repair-options"),
-    ("dark", 3, (1440, 900), "data-check-repair-options-dark.png", "repair-options"),
-    ("light", 3, (960, 640), "data-check-repair-compact.png", "repair-options"),
-    ("dark", 3, (960, 640), "data-check-repair-compact-dark.png", "repair-options"),
-    ("light", 3, (1440, 900), "data-check-repair-result.png", "repair-result"),
-    ("dark", 3, (1440, 900), "data-check-repair-result-dark.png", "repair-result"),
+    ("light", IDX["comments"], (1440, 900), "comments.png", "idle"),
+    ("light", IDX["collector"], (1440, 900), "collector.png", "running"),
+    ("light", IDX["monitor"], (1440, 900), "monitor.png", "running"),
+    ("light", IDX["data_check"], (1440, 900), "data-check.png", "idle"),
+    ("light", IDX["report_center"], (1440, 900), "report-center.png", "ready"),
+    ("dark", IDX["report_center"], (1440, 900), "report-center-dark.png", "ready"),
+    ("light", IDX["report_center"], (960, 640), "report-center-compact.png", "ready"),
+    ("dark", IDX["data_check"], (1440, 900), "data-check-dark.png", "issues"),
+    ("light", IDX["data_check"], (960, 640), "data-check-compact.png", "empty"),
+    ("dark", IDX["data_check"], (960, 640), "data-check-compact-dark.png", "issues"),
+    ("light", IDX["data_check"], (1440, 900), "data-check-repair-options.png", "repair-options"),
+    ("dark", IDX["data_check"], (1440, 900), "data-check-repair-options-dark.png", "repair-options"),
+    ("light", IDX["data_check"], (960, 640), "data-check-repair-compact.png", "repair-options"),
+    ("dark", IDX["data_check"], (960, 640), "data-check-repair-compact-dark.png", "repair-options"),
+    ("light", IDX["data_check"], (1440, 900), "data-check-repair-result.png", "repair-result"),
+    ("dark", IDX["data_check"], (1440, 900), "data-check-repair-result-dark.png", "repair-result"),
     # 深色与紧凑窗口验收截图
-    ("dark", 0, (1440, 900), "comments-dark.png", "running"),
-    ("dark", 1, (1440, 900), "collector-dark.png", "idle"),
-    ("dark", 2, (1440, 900), "monitor-dark.png", "running"),
-    ("light", 2, (960, 640), "monitor-compact.png", "idle"),
-    ("light", 1, (960, 640), "collector-compact.png", "idle"),
-    ("dark", 1, (960, 640), "collector-compact-dark.png", "idle"),
-    # 用户动态 / 弹幕（v1.0.4 新增的第 6/7 个工具，此前从未被截图覆盖）
-    ("light", 5, (1440, 900), "user-dynamics.png", "idle"),
-    ("dark", 5, (1440, 900), "user-dynamics-dark.png", "idle"),
-    ("light", 5, (960, 640), "user-dynamics-compact.png", "idle"),
-    ("light", 6, (1440, 900), "danmaku.png", "idle"),
-    ("dark", 6, (1440, 900), "danmaku-dark.png", "idle"),
-    ("light", 6, (960, 640), "danmaku-compact.png", "idle"),
-    ("dark", 6, (960, 640), "danmaku-compact-dark.png", "idle"),
+    ("dark", IDX["comments"], (1440, 900), "comments-dark.png", "running"),
+    ("dark", IDX["collector"], (1440, 900), "collector-dark.png", "idle"),
+    ("dark", IDX["monitor"], (1440, 900), "monitor-dark.png", "running"),
+    ("light", IDX["monitor"], (960, 640), "monitor-compact.png", "idle"),
+    ("light", IDX["collector"], (960, 640), "collector-compact.png", "idle"),
+    ("dark", IDX["collector"], (960, 640), "collector-compact-dark.png", "idle"),
+    # 用户动态 / 弹幕（第 6/7 个工具，此前从未被截图覆盖）
+    ("light", IDX["user_dynamics"], (1440, 900), "user-dynamics.png", "idle"),
+    ("dark", IDX["user_dynamics"], (1440, 900), "user-dynamics-dark.png", "idle"),
+    ("light", IDX["user_dynamics"], (960, 640), "user-dynamics-compact.png", "idle"),
+    ("light", IDX["danmaku"], (1440, 900), "danmaku.png", "idle"),
+    ("dark", IDX["danmaku"], (1440, 900), "danmaku-dark.png", "idle"),
+    ("light", IDX["danmaku"], (960, 640), "danmaku-compact.png", "idle"),
+    ("dark", IDX["danmaku"], (960, 640), "danmaku-compact-dark.png", "idle"),
     # 关系分析（第 8 个工具，零网络本地分析）
-    ("light", 7, (1440, 900), "relation-analysis.png", "idle"),
-    ("dark", 7, (1440, 900), "relation-analysis-dark.png", "idle"),
-    ("light", 7, (960, 640), "relation-analysis-compact.png", "idle"),
-    ("dark", 7, (960, 640), "relation-analysis-compact-dark.png", "idle"),
-    # 设置页在 8 个工具之后，索引 8（此前 7 个工具时为索引 7）
-    ("light", 8, (1440, 900), "settings.png", "idle"),
-    ("dark", 8, (1440, 900), "settings-dark.png", "idle"),
-    ("light", 8, (960, 640), "settings-compact.png", "idle"),
-    ("dark", 8, (960, 640), "settings-compact-dark.png", "idle"),
-    ("light", 8, (1440, 900), "settings-history.png", "history"),
-    ("dark", 8, (1440, 900), "settings-history-dark.png", "history"),
-    ("dark", 8, (960, 640), "settings-history-compact-dark.png", "history"),
-    ("dark", 8, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
-    ("light", 0, (960, 640), "comments-compact.png", "idle"),
-    ("dark", 2, (960, 640), "monitor-compact-dark.png", "running"),
+    ("light", IDX["relation_analysis"], (1440, 900), "relation-analysis.png", "idle"),
+    ("dark", IDX["relation_analysis"], (1440, 900), "relation-analysis-dark.png", "idle"),
+    ("light", IDX["relation_analysis"], (960, 640), "relation-analysis-compact.png", "idle"),
+    ("dark", IDX["relation_analysis"], (960, 640), "relation-analysis-compact-dark.png", "idle"),
+    # 设置页固定在全部工具之后
+    ("light", SETTINGS_IDX, (1440, 900), "settings.png", "idle"),
+    ("dark", SETTINGS_IDX, (1440, 900), "settings-dark.png", "idle"),
+    ("light", SETTINGS_IDX, (960, 640), "settings-compact.png", "idle"),
+    ("dark", SETTINGS_IDX, (960, 640), "settings-compact-dark.png", "idle"),
+    ("light", SETTINGS_IDX, (1440, 900), "settings-history.png", "history"),
+    ("dark", SETTINGS_IDX, (1440, 900), "settings-history-dark.png", "history"),
+    ("dark", SETTINGS_IDX, (960, 640), "settings-history-compact-dark.png", "history"),
+    ("dark", SETTINGS_IDX, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
+    ("light", IDX["comments"], (960, 640), "comments-compact.png", "idle"),
+    ("dark", IDX["monitor"], (960, 640), "monitor-compact-dark.png", "running"),
 ]
 
 DASHBOARD_SHOTS = [
@@ -173,9 +181,9 @@ def prepare_demo(page_index, state):
     page = win.pages[page_index]
     reset_page(page)
 
-    if page_index == 0:
+    if page_index == IDX["comments"]:
         page.link_edit.setText("https://www.bilibili.com/video/BV1DemoData01")
-    elif page_index == 1:
+    elif page_index == IDX["collector"]:
         page.src_edit.setPlainText(
             "https://www.bilibili.com/video/BV1DemoData01\n"
             "https://space.bilibili.com/10086/favlist?fid=2026")
@@ -205,7 +213,7 @@ def prepare_demo(page_index, state):
         page._render_dashboard(comparison.publish_round(first_round))
         page._render_dashboard(comparison.publish_round(
             second_round, round_number=2, state=dashboard_state))
-    elif page_index == 3:
+    elif page_index == IDX["data_check"]:
         page.out_row.set_value(r"D:\BiliToolbox\数据检查报告")
         if state == "idle":
             values = [
@@ -246,7 +254,7 @@ def prepare_demo(page_index, state):
                     ],
                 )
                 page.log_panel.append("1 个损坏文件已跳过，其他修复副本已安全生成。", "warn")
-    elif page_index == 4:
+    elif page_index == IDX["report_center"]:
         global _report_demo_ready
         if not _report_demo_ready:
             report_root = Path(_report_temp.name)
@@ -264,14 +272,14 @@ def prepare_demo(page_index, state):
             page.refresh_sources()
             _report_demo_ready = True
 
-    elif page_index == 7:
+    elif page_index == IDX["relation_analysis"]:
         # 关系分析页：填入中性演示路径，验证布局与来源声明可见
         page.out_row.set_value(r"D:\BiliToolbox\关系分析")
         page.fans1_row.set_value(r"D:\BiliToolbox\导出\粉丝清单_2026-01-01.csv")
         page.follows1_row.set_value(r"D:\BiliToolbox\导出\关注清单_2026-01-01.csv")
         page.fans2_row.set_value(r"D:\BiliToolbox\导出\粉丝清单_2026-09-01.csv")
 
-    elif page_index == 2:
+    elif page_index == IDX["monitor"]:
         running = state == "running"
         page.alert_total_check.setChecked(running)
         page.alert_windows_check.setChecked(True)
@@ -370,19 +378,24 @@ def shoot(index=0):
     win.switch(page_index)
     prepare_demo(page_index, state)
     win.show()
-    if size == (960, 640) and page_index in (1, 2, 3, 4, 5, 6, 7, 8):
-        current_page = settings if page_index == 8 else win.pages[page_index]
+    if size == (960, 640) and page_index in (
+            IDX["collector"], IDX["monitor"], IDX["data_check"],
+            IDX["report_center"], IDX["user_dynamics"], IDX["danmaku"],
+            IDX["relation_analysis"], SETTINGS_IDX):
+        current_page = (settings if page_index == SETTINGS_IDX
+                        else win.pages[page_index])
         page_scroll = current_page.findChild(QScrollArea, "pageScroll")
         if page_scroll is not None:
-            if page_index == 8:
+            if page_index == SETTINGS_IDX:
                 target = settings.history_card if state == "history" else settings.diagnostics_card
-            elif page_index == 4:
+            elif page_index == IDX["report_center"]:
                 target = current_page.tabs
-            elif page_index == 1:
+            elif page_index == IDX["collector"]:
                 target = current_page.dashboard_open_button
-            elif page_index == 2:
+            elif page_index == IDX["monitor"]:
                 target = current_page.alert_card
-            elif page_index in (5, 6, 7):
+            elif page_index in (IDX["user_dynamics"], IDX["danmaku"],
+                                IDX["relation_analysis"]):
                 target = current_page.params_card
             else:
                 target = (current_page.repair_card
@@ -392,7 +405,7 @@ def shoot(index=0):
             page_scroll.ensureWidgetVisible(target, 0, 8)
 
     def save():
-        if state == "history-detail" and page_index == 8:
+        if state == "history-detail" and page_index == SETTINGS_IDX:
             dialog = win.settings_page._build_task_history_dialog()
             dialog.show()
             app.processEvents()
@@ -442,9 +455,9 @@ def shoot_dashboard(index=0):
     settings.theme_combo.blockSignals(False)
     settings.cfg["theme"] = theme
     win.resize(*window_size)
-    win.switch(1)
-    prepare_demo(1, state)
-    page = win.pages[1]
+    win.switch(IDX["collector"])
+    prepare_demo(IDX["collector"], state)
+    page = win.pages[IDX["collector"]]
     win.show()
     page._open_dashboard()
     app.processEvents()

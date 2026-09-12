@@ -81,6 +81,15 @@ SENSITIVE_TEXT_RE = re.compile(
 #: 持久化 URL 判定：任意 scheme（展示层的 _URL_RE 只认 http/socks5，范围不同）。
 SENSITIVE_URL_RE = re.compile(r"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>\"']+")
 
+#: 导出列过滤判定（tools/report_center）：命中即从导出字段中剔除。
+#: 与持久化判定 SENSITIVE_KEY_RE 是又一层不同键集（导出层含 access/refresh
+#: token 但不含 proxy-account，持久化层相反），只收拢定义位置不合并语义；
+#: 原串自 report_center 逐字节搬移，行为锁在 test_report_center。
+EXPORT_SENSITIVE_KEY_RE = re.compile(
+    r"(?:cookie|sessdata|bili[_ -]?jct|access[_ -]?token|refresh[_ -]?token|"
+    r"authorization|bearer|password|passwd|secret|api[_ -]?key|proxy[_ -]?(?:user|account|pass))",
+    re.IGNORECASE,
+)
 
 def sanitize_text(value):
     """脱敏错误详情，不展示凭据、完整 URL、IP 或本地完整路径。"""

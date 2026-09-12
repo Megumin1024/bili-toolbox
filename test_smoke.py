@@ -97,7 +97,7 @@ shutil.rmtree("data/test_monitor", ignore_errors=True)
 from tools.monitor.server import MonitorServer
 
 srv = MonitorServer(bvid=BVIDS[0], interval=60, data_dir="data/test_monitor",
-                    cookie_path="data/test_cookies.json", log=glog)
+                    log=glog)
 url = srv.start()
 time.sleep(6)
 with urllib.request.urlopen(url + "api/latest", timeout=5) as resp:

@@ -22,6 +22,7 @@ from openpyxl import load_workbook
 from core import diagnostics, task_history
 from core import output as output_mod
 from core import xlsx as xlsx_mod
+from core.redact import EXPORT_SENSITIVE_KEY_RE as _SENSITIVE_KEY_RE
 
 
 KIND_COMMENT = "comment"
@@ -89,11 +90,7 @@ VIDEO_HEADER_MAP = {
     "弹幕": "danmaku", "评论": "reply", "点赞": "like", "投币": "coin",
     "收藏": "favorite", "分享": "share",
 }
-_SENSITIVE_KEY_RE = re.compile(
-    r"(?:cookie|sessdata|bili[_ -]?jct|access[_ -]?token|refresh[_ -]?token|"
-    r"authorization|bearer|password|passwd|secret|api[_ -]?key|proxy[_ -]?(?:user|account|pass))",
-    re.IGNORECASE,
-)
+# 敏感键判定已收拢为 core.redact.EXPORT_SENSITIVE_KEY_RE（原串搬移，见顶部导入）。
 
 Cancel = Callable[[], bool]
 Progress = Callable[..., None]

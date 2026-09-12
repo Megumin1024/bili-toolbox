@@ -3,8 +3,8 @@
 
 MonitorServer 生命周期：
 - 每实例独立 history 文件（按 BV 号），重启自动续接趋势
-- 网络层复用 core 的 BiliClient（通道降级/凭证预热激活/代理池），与采集
-  工具共用 cookie 存储与身份管理
+- 网络层复用 core.session 的进程级客户端单例（通道降级/凭证预热激活/代理池），
+  与采集工具共用 cookie 存储与身份管理；监控自身不再自建 BiliClient
 - 端口默认随机分配（0）
 
 采集:  /x/web-interface/view       播放/弹幕/评论/点赞/投币/收藏/分享
@@ -21,8 +21,7 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from core.client import BiliClient
-from core.proxy import ProxyPool
+from core import session
 from core.redact import sanitize_text
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -62,8 +61,8 @@ class _State:
 class MonitorServer:
     """一个实例 = 一个视频的采集 + 仪表盘服务。start() 后通过 url 访问。"""
 
-    def __init__(self, bvid, interval=60, transport="auto", proxy_spec=None,
-                 data_dir=None, cookie_path=None, log=None,
+    def __init__(self, bvid, interval=60,
+                 data_dir=None, log=None,
                  event_callback=None, session_id=None):
         self.bvid = bvid
         self.interval = max(5, min(3600, int(interval)))
@@ -75,10 +74,10 @@ class MonitorServer:
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.history_file = self.data_dir / f"history_{bvid}.jsonl"
         self.state = _State(bvid, self.interval)
-        self.pool = ProxyPool(proxy_spec or None)
-        self.client = BiliClient(self.pool, preferred_transport=transport,
-                                 cookie_path=str(cookie_path) if cookie_path else None,
-                                 log=self.log)
+        # 复用进程级 session 单例（设置页启动/保存时已按相同参数 configure），
+        # 不再自建 BiliClient——两者本就共用 shared_gate()。注意 stop() 不得
+        # 关闭这个共享客户端，它的生命周期归 session 管理。
+        self.client = session.get_client()
         self._server = None
         self._thread = None
         self._stop = threading.Event()
@@ -299,7 +298,7 @@ class MonitorServer:
                         "error": st.last_error,
                     }
                 try:
-                    payload["net"] = app.client.info()
+                    payload["net"] = session.info()
                 except Exception:  # noqa: BLE001 - 面板信息不因统计失败而失败
                     payload["net"] = None
                 self._json(payload)
@@ -332,7 +331,7 @@ class MonitorServer:
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         self.log(f"监控 {self.bvid} | 间隔 {self.interval}s | "
-                 f"代理池 {self.pool.status()['size']} 项 | {self.url}")
+                 f"代理池 {self.client.pool.status()['size']} 项 | {self.url}")
         return self.url
 
     def stop(self):
@@ -344,8 +343,6 @@ class MonitorServer:
             except Exception:  # noqa: BLE001
                 pass
             self._server = None
-        try:
-            self.client.close()
-        except Exception:  # noqa: BLE001
-            pass
+        # 共享客户端归 session 单例管理，这里绝不能 close——否则会把整个
+        # 进程（含其它工具）的网络通道一起关掉。
         self.log("监控已停止")

@@ -376,6 +376,27 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         server._poller_loop()
         self.assertEqual(server.state.samples, [sample])
 
+    def test_server_uses_session_singleton_and_never_closes_it(self):
+        """监控必须复用 core.session 进程级客户端，且停止时不得关闭它。
+
+        曾经的形态：MonitorServer 自建 BiliClient——与采集工具重复一份身份/
+        cookie 状态。并入 session 后，共享客户端的生命周期归 session 管理，
+        stop() 若沿用旧实现把 client 一并 close，会把全进程的网络通道关掉。
+        """
+        import tempfile
+        fake_client = Mock()
+        fake_client.stats = {"last_transport": "session", "last_latency_ms": 1}
+        fake_client.pool.status.return_value = {"size": 1}
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("core.session.get_client",
+                      return_value=fake_client) as get_client:
+            server = MonitorServer("BV1Session", data_dir=tmp,
+                                   log=lambda _msg: None)
+        self.assertIs(server.client, fake_client)
+        get_client.assert_called_once_with()
+        server.stop()
+        fake_client.close.assert_not_called()
+
     def test_event_session_gate_rejects_stale_and_fast_restart_events(self):
         page = MonitorPage.__new__(MonitorPage)
         page._active_session_id = "new"
