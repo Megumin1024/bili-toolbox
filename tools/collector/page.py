@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QAbstractScrollArea, QApplicat
 from app.task_page import TaskPage
 from app.widgets import PathRow, StatusPill, card, h2, muted
 from core import output as output_mod
+from core.budget import (DEFAULT_MAX_MINUTES, DEFAULT_MAX_REQUESTS,
+                         MAX_MINUTES_LIMIT, MAX_REQUESTS_LIMIT)
 
 from .comparison import METRICS, STATE_LABELS, SessionComparison, sort_rows
 from .comparison_chart import ComparisonChart
@@ -274,12 +276,34 @@ class CollectorPage(TaskPage):
         self.sleep_edit = QLineEdit("0.3")
         self.sleep_edit.setPlaceholderText("每视频间隔秒（默认 0.3）")
         form.addRow("限速(秒/视频)", self.sleep_edit)
+        self.max_requests_edit = QLineEdit(str(DEFAULT_MAX_REQUESTS))
+        self.max_requests_edit.setPlaceholderText(
+            f"本次任务最多发多少次请求（1–{MAX_REQUESTS_LIMIT:,}），到限安全停止")
+        form.addRow("请求数上限", self.max_requests_edit)
+        self.max_minutes_edit = QLineEdit(str(DEFAULT_MAX_MINUTES))
+        self.max_minutes_edit.setPlaceholderText(
+            f"任务最长运行多少分钟（1–{MAX_MINUTES_LIMIT:,}），到限安全停止")
+        form.addRow("时长上限(分钟)", self.max_minutes_edit)
         self.auto_open = QCheckBox("完成后自动打开 Excel")
         form.addRow("", self.auto_open)
         self.params_lay.addLayout(form)
         self.params_lay.addWidget(muted(
             "快照断点续传：已完成部分保留在 snapshots.jsonl，中断后重跑自动衔接。"
-            "定时追踪模式每轮输出当前 Excel，结束后生成含增速榜的最终报告。"))
+            "定时追踪模式每轮输出当前 Excel，结束后生成含增速榜的最终报告。\n"
+            "请求数/时长预算到限后安全停止：已采快照照常出 Excel，可重跑续传。"))
+
+    @staticmethod
+    def _parse_int(text, label, default, lo, hi):
+        raw = (text or "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(float(raw))
+        except ValueError:
+            raise ValueError(f"{label}需为数字")
+        if not lo <= value <= hi:
+            raise ValueError(f"{label}需在 {lo}~{hi} 之间")
+        return value
 
     def collect_params(self):
         cached = getattr(self, "_validated_start_params", None)
@@ -297,10 +321,17 @@ class CollectorPage(TaskPage):
             rounds = max(0, int(self.rounds_edit.text().strip() or 5))
         except ValueError:
             raise ValueError("限速/间隔/轮数请填数字")
+        max_requests = self._parse_int(
+            self.max_requests_edit.text(), "请求数上限",
+            DEFAULT_MAX_REQUESTS, 1, MAX_REQUESTS_LIMIT)
+        max_minutes = self._parse_int(
+            self.max_minutes_edit.text(), "时长上限",
+            DEFAULT_MAX_MINUTES, 1, MAX_MINUTES_LIMIT)
         return {"sources": src_lines, "out_dir": out_dir, "sleep": sleep,
                 "monitor": self.radio_monitor.isChecked(),
                 "interval_min": interval_min, "rounds": rounds,
-                "open_result": self.auto_open.isChecked()}
+                "open_result": self.auto_open.isChecked(),
+                "max_requests": max_requests, "max_minutes": max_minutes}
 
     def build_post_result_card(self):
         self._comparison = SessionComparison()
@@ -351,6 +382,12 @@ class CollectorPage(TaskPage):
             "interval_min": interval_min,
             "rounds": rounds,
             "open_result": self.auto_open.isChecked(),
+            "max_requests": self._parse_int(
+                self.max_requests_edit.text(), "请求数上限",
+                DEFAULT_MAX_REQUESTS, 1, MAX_REQUESTS_LIMIT),
+            "max_minutes": self._parse_int(
+                self.max_minutes_edit.text(), "时长上限",
+                DEFAULT_MAX_MINUTES, 1, MAX_MINUTES_LIMIT),
         }
 
     def pipeline(self):
@@ -489,6 +526,8 @@ class CollectorPage(TaskPage):
             "interval_min": params.get("interval_min", 60),
             "rounds": params.get("rounds", 5),
             "open_result": bool(params.get("open_result", False)),
+            "max_requests": params.get("max_requests", DEFAULT_MAX_REQUESTS),
+            "max_minutes": params.get("max_minutes", DEFAULT_MAX_MINUTES),
         }
 
     def history_output_paths(self, result):
@@ -511,6 +550,10 @@ class CollectorPage(TaskPage):
         self.radio_once.setChecked(not bool(params.get("monitor", False)))
         self.interval_edit.setText(str(params.get("interval_min", 60)))
         self.rounds_edit.setText(str(params.get("rounds", 5)))
+        self.max_requests_edit.setText(
+            str(params.get("max_requests", DEFAULT_MAX_REQUESTS)))
+        self.max_minutes_edit.setText(
+            str(params.get("max_minutes", DEFAULT_MAX_MINUTES)))
         self.auto_open.setChecked(bool(params.get("open_result", False)))
         self.src_edit.setFocus()
 
@@ -522,8 +565,10 @@ class CollectorPage(TaskPage):
             payload = result["dashboard"]
             if isinstance(payload.get("rows"), list):
                 self._render_dashboard(payload)
+        head = ("已达上限安全停止" if result.get("stopped_reason") == "budget_reached"
+                else "完成 ✓")
         self.result_card.show_result(
-            f"完成 ✓ {result['videos']} 个视频 / {result['snapshots']} 快照 / "
+            f"{head} {result['videos']} 个视频 / {result['snapshots']} 快照 / "
             f"{result['rounds']} 轮（上轮失败 {result['fail']}）",
             [("Excel 报告", result["xlsx"]),
              ("快照数据(jsonl)", str(result["dir"] + "/snapshots.jsonl")),

@@ -33,6 +33,7 @@ from pathlib import Path
 from openpyxl.utils import get_column_letter
 
 from core import xlsx as xlsx_mod
+from core.budget import BudgetExhaustedError
 from core.cancel import TaskCancelledError, wait as cancel_wait
 
 from . import danmaku_pb2
@@ -63,10 +64,11 @@ class DanmakuDecodeError(RuntimeError):
 
 # ---------- 输入解析（纯函数，不发请求） ----------
 
-def parse_target(text):
+def parse_target(text, cancel=None):
     """输入 → (bvid, aid, 分P)。链接 / BV号 / av号均可，支持 ?p=N。
 
-    只解析，不发业务请求；b23.tv 短链例外（必须跟一次 30x 才知道指向哪）。
+    只解析，不发业务请求；b23.tv 短链例外（必须跟一次 30x 才知道指向哪，
+    该次解析过全局闸门，cancel 仅作用于其闸门等待）。
     用于拿 cid 的那次 view 请求在 fetch_video_meta 里发，且只发一次。
     """
     from core import links
@@ -78,7 +80,7 @@ def parse_target(text):
     if m:
         s = m.group(0)
     if links.B23_RE.search(s):
-        s = links.resolve_url(s)
+        s = links.resolve_url(s, cancel=cancel)
     page = 1
     pm = re.search(r"[?&]p=(\d+)", s, re.I)
     if pm:
@@ -92,14 +94,17 @@ def parse_target(text):
     raise ValueError(f"无法识别的视频链接或 BV 号：{s[:60]}")
 
 
-def fetch_video_meta(bvid=None, aid=None, page=1, cancel=None):
+def fetch_video_meta(bvid=None, aid=None, page=1, cancel=None, budget=None):
     """一次 view 请求取齐 cid / 时长 / 标题 / 分P 列表（游客可用）。"""
     from core import session
 
     if not bvid and not aid:
         raise ValueError("缺少 BV 号或 av 号")
     url = (f"{VIEW_URL}?bvid={bvid}" if bvid else f"{VIEW_URL}?aid={aid}")
-    data = session.http_get_json(url, cancel=cancel)
+    kwargs = {"cancel": cancel}
+    if budget is not None:
+        kwargs["budget"] = budget
+    data = session.http_get_json(url, **kwargs)
     if data.get("code") != 0:
         raise ValueError(f"视频信息获取失败：code={data.get('code')} "
                          f"{data.get('message')}")
@@ -227,7 +232,7 @@ class DanmakuCrawler:
     def __init__(self, cid, out_dir, duration=0,
                  max_segments=DEFAULT_MAX_SEGMENTS, sleep=DEFAULT_SLEEP,
                  progress=None, cancel=None, fetch=None, sleeper=None,
-                 name=None, page=1, part=""):
+                 name=None, page=1, part="", budget=None):
         self.cid = int(cid)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -239,6 +244,10 @@ class DanmakuCrawler:
         # 延迟导入：本模块要能离线单独导入（测试注入 fetch 后不碰网络）
         self._fetch = fetch or self._session_fetch
         self._progress = progress or (lambda **kw: None)
+        # 任务预算（core.budget.TaskBudget），多分P时各爬取器共享同一对象；
+        # None = 无预算。段请求的强制点在 BiliClient._request（fetch 透传
+        # budget），本层的职责是段循环边界查 expired() 与落盘后记账记录数。
+        self.budget = budget
         # 多分P时每个分P一个爬取器，jsonl 得按名字区分，不能只认 cid
         self.page = int(page)
         self.part = part or ""
@@ -256,9 +265,14 @@ class DanmakuCrawler:
 
     def _session_fetch(self, url):
         """经 core.session 的二进制通道。cancel 必须透传：HTTP 层内部的退避
-        等待靠它才能被打断，不透传的话用户按取消要等满整个等待预算。"""
+        等待靠它才能被打断，不透传的话用户按取消要等满整个等待预算。
+        budget 同理透传：业务请求数的强制点在 HTTP 层入口；无预算时不附加
+        该 kwarg，缺省调用与旧路径一致。"""
         from core import session
-        return session.http_get_bytes(url, cancel=self.cancel)
+        kwargs = {"cancel": self.cancel}
+        if self.budget is not None:
+            kwargs["budget"] = self.budget
+        return session.http_get_bytes(url, **kwargs)
 
     def segment_url(self, index):
         return f"{SEG_URL}?type=1&oid={self.cid}&segment_index={index}"
@@ -279,12 +293,22 @@ class DanmakuCrawler:
         os.replace(tmp, self.out_path)
 
     def crawl(self):
-        """逐段抓到空段 / 段数上限 / 用户取消为止。返回 stats。"""
+        """逐段抓到空段 / 段数上限 / 用户取消 / 预算到限为止。返回 stats。"""
         seen = set()
         expect = self.stats["expected_segments"]
         self.rows = []
         try:
             for index in range(1, self.max_segments + 1):
+                # 预算边界：到限按正常完成收尾（不是失败、也不是取消）。
+                # 取消检查在预算检查之前（_load_segment 内），两者同时到期
+                # 时按取消语义。
+                if self.budget is not None and self.budget.expired():
+                    self.stats["stopped_reason"] = "budget_reached"
+                    self._p(level="warn",
+                            text=f"已达预算上限（{self.budget.reason()}），"
+                                 f"安全停止，保留已抓到的 "
+                                 f"{len(self.rows):,} 条弹幕")
+                    break
                 raw = self._load_segment(index)
                 if not raw:
                     # 空段 = 服务端说到头了。但比时长推算的位置早退，就可能
@@ -314,6 +338,8 @@ class DanmakuCrawler:
                 self.stats["segments"] = index
                 self.stats["rows"] = len(self.rows)
                 self._flush()
+                if self.budget is not None:
+                    self.budget.observe_records(new)
                 self._p(text=f"第 {index} 段：+{new} 条，"
                              f"累计 {len(self.rows):,} 条弹幕")
                 if index < self.max_segments and not self._pace(self.sleep):
@@ -329,6 +355,16 @@ class DanmakuCrawler:
                 self._flush()
             self._p(level="warn",
                     text=f"已取消，保留已抓到的 {len(self.rows):,} 条弹幕")
+        except BudgetExhaustedError:
+            # 兜底：段请求在 HTTP 层入口被预算硬拦。与取消分支对称地保留
+            # 已抓数据，但记为预算停止——取消与预算互不冒充。
+            self.stats["stopped_reason"] = "budget_reached"
+            self.stats["rows"] = len(self.rows)
+            if self.rows:
+                self._flush()
+            self._p(level="warn",
+                    text=f"已达预算上限，安全停止，保留已抓到的 "
+                         f"{len(self.rows):,} 条弹幕")
         return self.stats
 
     def _pace(self, seconds):
@@ -361,6 +397,8 @@ def part_label(page, part=""):
 def _completion_note(stats, expect, rows):
     if stats.get("cancelled"):
         return "任务被中途取消"
+    if stats.get("stopped_reason") == "budget_reached":
+        return "已达上限安全停止（请求数/时长预算到限，已抓数据完整保留）"
     if not rows:
         return "一段都没抓到：该视频可能确实没有弹幕，也可能被降级，两者响应相同"
     if stats.get("truncated"):

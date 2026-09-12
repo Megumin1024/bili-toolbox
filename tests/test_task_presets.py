@@ -246,6 +246,9 @@ class TaskPresetPageTests(unittest.TestCase):
         page.radio_once = _CheckField(False)
         page.interval_edit = _TextField("10")
         page.rounds_edit = _TextField("3")
+        # 预算输入：新增控件随 fake 清单同步（默认值与 core.budget 一致）
+        page.max_requests_edit = _TextField("20000")
+        page.max_minutes_edit = _TextField("240")
         page.auto_open = _CheckField(True)
         params = page.collect_preset_params()
         self.assertEqual(params["sources"], [])

@@ -10,6 +10,8 @@ import time
 from pathlib import Path
 
 from core import links, risk, session
+from core.budget import TaskBudget
+from core.cancel import wait as cancel_wait
 from core.risk import RiskChallengeError
 
 from . import core
@@ -41,8 +43,14 @@ def _read_jsonl_since(path, offset):
 
 
 def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
-                 rounds=1, cancel=None, progress=None, open_result=False):
-    """流水线。返回结果 dict。"""
+                 rounds=1, cancel=None, progress=None, open_result=False,
+                 max_requests=None, max_minutes=None):
+    """流水线。返回结果 dict。
+
+    max_requests / max_minutes 为任务预算（core.budget.TaskBudget，每次任务
+    新建）；None = 该项无上限，旧调用行为不变。到限按正常完成收尾：已采
+    快照照常出 Excel，结果记 stopped_reason="budget_reached"。
+    """
 
     def p(**kw):
         if progress:
@@ -53,13 +61,22 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
     snap_path = out / "snapshots.jsonl"
     task_start_offset = _file_size(snap_path)
 
+    budget = None
+    if max_requests is not None or max_minutes is not None:
+        # 未提供任何预算参数时保持 budget=None：整条请求链的调用与引入
+        # 预算前逐字节一致（旧签名、旧测试不受影响）。
+        budget = TaskBudget(
+            max_requests=max_requests,
+            max_seconds=(max_minutes * 60) if max_minutes is not None else None)
+
     p(text="预热风控凭证（buvid 激活 + bili_ticket，24h 缓存）…")
     session.ensure_ready()
 
     p(text="展开采集来源…")
     bvids, notes = [], {}
     for line in sources:
-        for bv, note in links.expand_source(line, progress=p):
+        for bv, note in links.expand_source(line, progress=p,
+                                            cancel=cancel, budget=budget):
             if bv not in notes:
                 bvids.append(bv)
                 notes[bv] = note
@@ -75,6 +92,7 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
     rnd = 0
     snaps = []
     last_round_failed = set()
+    stopped_reason = None
     while True:
         rnd += 1
         if monitor:
@@ -117,7 +135,7 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
             try:
                 call_ok, call_fail = core.collect_snapshot(
                     bvids[start_idx:], sleep=sleep, progress=round_progress, cancel=cancel,
-                    snapshot_path=snap_path)
+                    snapshot_path=snap_path, budget=budget)
                 for record in call_ok:
                     bvid = str(record.get("bvid") or "") if isinstance(record, dict) else ""
                     if bvid:
@@ -141,6 +159,10 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
                     continue
                 raise RuntimeError("风控挑战未完成人工验证，采集中止"
                                    "（已完成部分保留在 snapshots.jsonl，重跑可断点续传）")
+        # 本轮是否因预算提前收尾（不是取消）：collect_snapshot 在视频循环
+        # 边界或 HTTP 层入口被预算拦下都会正常返回。
+        budget_stop_round = (budget is not None and budget.expired()
+                             and not (cancel and cancel()))
         round_records = _read_jsonl_since(snap_path, round_start_offset)
         for record in round_records:
             bvid = str(record.get("bvid") or "") if isinstance(record, dict) else ""
@@ -170,7 +192,13 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
             )
             p(dashboard=dashboard)
         else:
-            p(text="本轮未完成，已取消；已写入快照保留，但看板不更新", level="warn")
+            if budget_stop_round:
+                p(level="warn",
+                  text=f"已达预算上限（{budget.reason()}），本轮提前结束；"
+                       "已写入快照保留，可重跑续传")
+            else:
+                p(text="本轮未完成，已取消；已写入快照保留，但看板不更新",
+                  level="warn")
 
         # 重建每视频快照序列（跨轮次，按时间排序）
         by_bvid = {}
@@ -197,19 +225,35 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
         core.export_xlsx(snaps, growth, meta, xlsx_path, progress=p)
         p(text="Excel 已更新")
 
-        if not monitor or (rounds and rnd >= rounds):
-            break
+        # 收尾判定顺序：取消 > 预算 > 正常完成。单次快照模式同样可能在中途
+        # 耗尽预算，所以预算检查必须放在"monitor=False 直接 break"之前。
         if cancel and cancel():
             p(text="已取消")
             break
-        # 可中断的等待
+        if budget is not None and (budget_stop_round or budget.expired()):
+            stopped_reason = "budget_reached"
+            p(level="warn",
+              text=f"已达预算上限（{budget.reason()}），安全停止")
+            break
+        if not monitor or (rounds and rnd >= rounds):
+            break
+        # 轮间等待；时长预算到限同样在此打断，追踪模式被时长上限约束。
         deadline = time.time() + interval_min * 60
+        budget_stop_wait = False
         while time.time() < deadline:
             if cancel and cancel():
                 p(text="已取消")
                 break
-            time.sleep(5)
+            if budget is not None and budget.expired():
+                budget_stop_wait = True
+                break
+            cancel_wait(min(5.0, max(0.0, deadline - time.time())), cancel)
         if cancel and cancel():
+            break
+        if budget_stop_wait:
+            stopped_reason = "budget_reached"
+            p(level="warn",
+              text=f"已达预算上限（{budget.reason()}），安全停止追踪")
             break
 
     if open_result and os.name == "nt":
@@ -219,4 +263,4 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
             pass
     return {"xlsx": str(xlsx_path), "dir": str(out), "videos": len(bvids),
             "snapshots": len(snaps), "rounds": rnd, "fail": len(last_round_failed),
-            "dashboard": dashboard}
+            "dashboard": dashboard, "stopped_reason": stopped_reason}

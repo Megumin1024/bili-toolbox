@@ -23,6 +23,7 @@ from pathlib import Path
 from openpyxl.utils import get_column_letter
 
 from core import wbi, xlsx as xlsx_mod
+from core.budget import BudgetExhaustedError
 from core.cancel import TaskCancelledError, wait as cancel_wait
 
 DYNAMIC_FEED_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
@@ -158,7 +159,7 @@ class DynamicsCrawler:
     def __init__(self, uid, out_dir, max_pages=DEFAULT_MAX_PAGES,
                  sleep=DEFAULT_SLEEP, empty_retries=DEFAULT_EMPTY_RETRIES,
                  progress=None, cancel=None, fetch=None, sleeper=None,
-                 key_cache=None):
+                 key_cache=None, budget=None):
         self.uid = int(uid)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -171,6 +172,10 @@ class DynamicsCrawler:
         # 取密钥也要能取消：首次请求前会先取一次 nav，那条路同样会退避重试。
         self._keys = key_cache or wbi.WbiKeyCache(cancel=self.cancel)
         self._progress = progress or (lambda **kw: None)
+        # 任务预算（core.budget.TaskBudget），每次任务新建；None = 无预算。
+        # 业务请求的强制点在 BiliClient._request（fetch 透传 budget），
+        # 本层的职责是页循环边界查 expired() 与落盘后 observe_records(n)。
+        self.budget = budget
         self.out_path = self.out_dir / f"dynamics_{self.uid}.jsonl"
         self.rows = []
         self.stats = {"uid": self.uid, "pages": 0, "requests": 0,
@@ -187,10 +192,14 @@ class DynamicsCrawler:
 
         cancel 必须透传：HTTP 层内部的退避等待受 TOTAL_WAIT_BUDGET 约束，拿不到
         取消谓词就只能睡满预算。爬取器自己那层取消检查在这之下够不着，
-        不透传的话用户按取消最坏要等 90 秒。
+        不透传的话用户按取消最坏要等 90 秒。budget 同理透传：业务请求数的
+        强制点在 HTTP 层入口；无预算时不附加该 kwarg，缺省调用与旧路径一致。
         """
         from core import session          # 延迟导入：本模块要能离线单独导入
-        return session.http_get_json(url, cancel=self.cancel)
+        kwargs = {"cancel": self.cancel}
+        if self.budget is not None:
+            kwargs["budget"] = self.budget
+        return session.http_get_json(url, **kwargs)
 
     def _load_page(self, offset):
         """取一页。空结果退避重试；返回 (items, has_more, next_offset)。"""
@@ -230,7 +239,7 @@ class DynamicsCrawler:
         os.replace(tmp, self.out_path)
 
     def crawl(self):
-        """抓取到 max_pages / 没有更多 / 用户取消为止。返回 stats。"""
+        """抓取到 max_pages / 没有更多 / 用户取消 / 预算到限为止。返回 stats。"""
         seen = set()
         offset = ""
         self.rows = []
@@ -238,6 +247,14 @@ class DynamicsCrawler:
             while self.stats["pages"] < self.max_pages:
                 if self._cancelled():
                     raise TaskCancelledError()
+                # 预算边界：到限按正常完成收尾（不是失败、也不是取消）。
+                # 取消检查在预算检查之前，cancel 与预算同时到期时按取消语义。
+                if self.budget is not None and self.budget.expired():
+                    self.stats["stopped_reason"] = "budget_reached"
+                    self._p(level="warn",
+                            text=f"已达预算上限（{self.budget.reason()}），"
+                                 f"安全停止，保留已抓到的 {len(self.rows)} 条动态")
+                    break
                 items, has_more, next_offset = self._load_page(offset)
                 if not items:
                     if self.stats["pages"] == 0:
@@ -260,6 +277,8 @@ class DynamicsCrawler:
                 self.stats["pages"] += 1
                 self.stats["rows"] = len(self.rows)
                 self._flush()
+                if self.budget is not None:
+                    self.budget.observe_records(new)
                 self._p(text=f"第 {self.stats['pages']} 页：+{new} 条，"
                              f"累计 {len(self.rows)} 条动态")
                 if not has_more or not next_offset:
@@ -276,6 +295,16 @@ class DynamicsCrawler:
             if self.rows:
                 self._flush()
             self._p(level="warn", text=f"已取消，保留已抓到的 {len(self.rows)} 条动态")
+        except BudgetExhaustedError:
+            # 兜底：空结果重试等循环内部的请求被 HTTP 层硬拦。与取消分支
+            # 对称地保留已抓数据，但记为预算停止——取消与预算互不冒充。
+            self.stats["stopped_reason"] = "budget_reached"
+            self.stats["rows"] = len(self.rows)
+            if self.rows:
+                self._flush()
+            self._p(level="warn",
+                    text=f"已达预算上限，安全停止，保留已抓到的 "
+                         f"{len(self.rows)} 条动态")
         return self.stats
 
 
@@ -296,8 +325,14 @@ def export_xlsx(rows, uid, stats, path, progress=None):
     ws = wb.create_sheet("概览")
     sw.ws = ws
     sw.title_row(ws, f"用户动态导出 · UID {uid}", 4)
-    note = ("注意：达到页数上限，可能还有更早的动态未抓取" if stats.get("truncated")
-            else "已抓到底" if not stats.get("cancelled") else "任务被中途取消")
+    if stats.get("stopped_reason") == "budget_reached":
+        note = "已达上限安全停止（请求数/时长预算到限，已抓数据完整保留）"
+    elif stats.get("truncated"):
+        note = "注意：达到页数上限，可能还有更早的动态未抓取"
+    elif not stats.get("cancelled"):
+        note = "已抓到底"
+    else:
+        note = "任务被中途取消"
     sw.kv(ws, [
         ("UID", uid, "数据来自该用户的公开动态"),
         ("动态条数", len(rows), f"共 {stats.get('pages', 0)} 页"

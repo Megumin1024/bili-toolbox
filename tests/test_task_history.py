@@ -581,6 +581,9 @@ class TaskPageHookTests(unittest.TestCase):
         page.radio_once = _Field()
         page.interval_edit = _Field()
         page.rounds_edit = _Field()
+        # 预算输入：新增控件随 fake 清单同步
+        page.max_requests_edit = _Field()
+        page.max_minutes_edit = _Field()
         page.auto_open = _Field()
         params = {
             "sources": ["BV1Demo", "av2"], "out_dir": "D:\\export",

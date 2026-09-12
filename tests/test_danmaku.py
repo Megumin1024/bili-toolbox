@@ -911,6 +911,9 @@ class DanmakuPageTests(unittest.TestCase):
         page.out_row = self._Row("D:\\out")
         page.segments_edit = self._Edit("20")
         page.sleep_edit = self._Edit("0.8")
+        # 预算输入：新增控件随 fake 清单同步（默认值与 core.budget 一致）
+        page.max_requests_edit = self._Edit("20000")
+        page.max_minutes_edit = self._Edit("240")
         page.all_pages = self._Check(all_pages)
         page.auto_open = self._Check(True)
         return page

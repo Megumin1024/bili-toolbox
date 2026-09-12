@@ -151,30 +151,40 @@ class BiliClient:
                               sleep=self._sleep)
 
     # ---------- 对外 ----------
-    def fetch_json(self, url, retries=RETRY_ATTEMPTS, cancel=None):
+    def fetch_json(self, url, retries=RETRY_ATTEMPTS, cancel=None, budget=None):
         """请求 JSON 并解析。重试/风控/统计策略见 _request。"""
-        return self._request(url, "get_json", retries, cancel)
+        return self._request(url, "get_json", retries, cancel, budget)
 
-    def fetch_bytes(self, url, retries=RETRY_ATTEMPTS, cancel=None):
+    def fetch_bytes(self, url, retries=RETRY_ATTEMPTS, cancel=None, budget=None):
         """请求原始字节（二进制接口，如弹幕 protobuf 分段）。
 
         除了不解析响应体，闸门、重试、退避、统计与探针回报与 fetch_json 完全同一
         段代码——二进制通道不另开一条简化版风控路径，否则风控信号会被当数据吞掉。
         """
-        return self._request(url, "get_bytes", retries, cancel)
+        return self._request(url, "get_bytes", retries, cancel, budget)
 
-    def _request(self, url, method, retries, cancel):
+    def _request(self, url, method, retries, cancel, budget=None):
         """共享请求循环：两种通道在这里只差一行。
 
         - 发请求前先过全局闸门：全局限速 + 熔断冷却（见 core.gate）；
+        - budget 为任务预算（core.budget.TaskBudget）：到限抛
+          BudgetExhaustedError，异常在 try 块之外直接向上传播——不被重试/
+          退避/熔断逻辑捕获，不改变 gate 状态、不计入任何失败统计；
         - 退避遵守 Retry-After、带抖动，并受 TOTAL_WAIT_BUDGET 总预算约束；
-        - cancel 为真值时立即抛出 TaskCancelledError，不计入任何失败统计。
+        - cancel 为真值时立即抛出 TaskCancelledError，不计入任何失败统计；
+          取消优先于预算：cancel 检查在预算检查之前。
         """
         last_exc = None
         waited = 0.0
         for attempt in range(retries):
             if self._cancelled(cancel):
                 raise TaskCancelledError()
+            if budget is not None and attempt == 0:
+                # 预算强制点：cancel 之后、gate.acquire 之前；检查通过立即
+                # 计数。一次 fetch_* 调用只检查/记账一次（attempt==0），
+                # 内部传输重试不重复检查——重试受 TOTAL_WAIT_BUDGET 约束。
+                budget.check_request()
+                budget.observe_request()
             if not self.gate.acquire(cancel, on_wait=self._log_gate_wait):
                 raise TaskCancelledError()
             # transport 与 reported 必须同时在此初始化：

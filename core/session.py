@@ -101,7 +101,7 @@ def _attach_vtoken(url):
 
 # ---------------- 统一请求入口 ----------------
 
-def http_get_json(url, retries=3, cancel=None):
+def http_get_json(url, retries=3, cancel=None, budget=None):
     """统一 JSON GET（四层风控栈）。-352+voucher → RiskChallengeError。
 
     其余风控/限流信号由 BiliClient 内部按策略重试，最终失败抛
@@ -109,24 +109,34 @@ def http_get_json(url, retries=3, cancel=None):
 
     cancel 为取消谓词（如 threading.Event.is_set）：为真时请求立即中止、
     退避等待被打断，抛 core.cancel.TaskCancelledError，不计入任何失败统计。
+
+    budget 为可选任务预算（core.budget.TaskBudget）：到限抛
+    BudgetExhaustedError（正常完成语义，非网络故障），透传给 fetch_json。
+    budget 为 None 时不附加该 kwarg——缺省调用与引入预算前逐字节一致。
     """
     url = _attach_vtoken(url)
+    kwargs = {"retries": retries, "cancel": cancel}
+    if budget is not None:
+        kwargs["budget"] = budget
     try:
-        return get_client().fetch_json(url, retries=retries, cancel=cancel)
+        return get_client().fetch_json(url, **kwargs)
     except RiskVoucher as exc:
         raise RiskChallengeError(exc.v_voucher) from exc
 
 
-def http_get_bytes(url, retries=3, cancel=None):
+def http_get_bytes(url, retries=3, cancel=None, budget=None):
     """统一原始字节 GET（四层风控栈），给二进制接口用（如弹幕 protobuf）。
 
     失败语义与 http_get_json 一致：重试/退避/闸门/统计全套相同，只是成功时
     返回 bytes 而非解析后的 dict。响应体若其实是风控 JSON，在传输层就已被
-    识别并抛错，不会当成"取到了 0 条数据"。
+    识别并抛错，不会当成"取到了 0 条数据"。budget 透传语义同 http_get_json。
     """
     url = _attach_vtoken(url)
+    kwargs = {"retries": retries, "cancel": cancel}
+    if budget is not None:
+        kwargs["budget"] = budget
     try:
-        return get_client().fetch_bytes(url, retries=retries, cancel=cancel)
+        return get_client().fetch_bytes(url, **kwargs)
     except RiskVoucher as exc:
         raise RiskChallengeError(exc.v_voucher) from exc
 

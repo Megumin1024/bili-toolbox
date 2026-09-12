@@ -33,12 +33,12 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
 
     def parse_with_recovery():
         try:
-            return links.parse_link(url)
+            return links.parse_link(url, cancel=cancel)
         except RiskChallengeError as e:
             p(level="warn", text=f"触发B站风控挑战(-352)：{e.v_voucher[:28]}…")
             if not risk.risk_recovery_flow(e.v_voucher, progress=p):
                 raise
-            return links.parse_link(url)
+            return links.parse_link(url, cancel=cancel)
 
     p(text="解析链接…")
     kind, oid, info = parse_with_recovery()

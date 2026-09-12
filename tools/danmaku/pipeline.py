@@ -12,6 +12,7 @@ core.session：JSON 的走 JSON 通道，弹幕字节走二进制通道，两者
 import os
 from pathlib import Path
 
+from core.budget import BudgetExhaustedError, TaskBudget
 from core.cancel import TaskCancelledError, wait as cancel_wait
 
 from . import analysis, core
@@ -19,25 +20,43 @@ from . import analysis, core
 
 def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
                  sleep=core.DEFAULT_SLEEP, cancel=None, progress=None,
-                 open_result=False, all_pages=False):
+                 open_result=False, all_pages=False,
+                 max_requests=None, max_minutes=None):
     """完整流水线。返回结果 dict。
 
     target 可以是视频链接、BV 号或 av 号（链接可带 ?p=N 指定分P）。
     all_pages=True 时忽略 ?p=N，抓全部分P。
     全部抓完一条都没有且视频自称有弹幕时抛 core.DanmakuUnavailable，由
     TaskRunner 走失败通道——不交一份"该视频没有弹幕"的假报告。
+
+    max_requests / max_minutes 为任务预算（core.budget.TaskBudget，每次任务
+    新建，各分P与 meta 请求共享同一账本）；None = 该项无上限，旧调用行为
+    不变。到限按正常完成收尾：已抓分P照常导出，stats 记
+    stopped_reason="budget_reached"。
     """
 
     def p(**kw):
         if progress:
             progress(**kw)
 
+    budget = None
+    if max_requests is not None or max_minutes is not None:
+        # 未提供任何预算参数时保持 budget=None：整条请求链的调用与引入
+        # 预算前逐字节一致（旧签名、旧测试不受影响）。
+        budget = TaskBudget(
+            max_requests=max_requests,
+            max_seconds=(max_minutes * 60) if max_minutes is not None else None)
+
     bvid, aid, page = core.parse_target(target)
     try:
         meta = core.fetch_video_meta(bvid=bvid, aid=aid, page=page,
-                                     cancel=cancel)
+                                     cancel=cancel, budget=budget)
     except TaskCancelledError:
         return _cancelled_before_meta(bvid, aid, out_dir)
+    except BudgetExhaustedError:
+        # meta 阶段就被预算拦下：没有任何数据可导出，按预算停止正常返回
+        # （不冒充失败，也不冒充取消）。
+        return _budget_stopped_before_meta(bvid, aid, out_dir)
     label = meta["bvid"] or f"av{meta['aid']}"
     p(text=f"视频：{meta['title'][:40]}")
     p(text=f"{label} · P{meta['page']}/{meta['page_count']} · "
@@ -60,17 +79,27 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
 
     rows, parts = [], []
     cancelled = False
+    budget_stop = False
     for i, n in enumerate(targets):
         # 只拦"下一个分P"：第一个分P无论如何都要走一遍爬取器，由它自己把取消
         # 记成 cancelled 并落盘已抓到的内容——用户按取消也该拿到一份报告。
+        # 预算同理：第一轮的边界检查交给爬虫内部的段循环。
         if i and cancel and cancel():
             cancelled = True
             break
+        if i and budget is not None and budget.expired():
+            budget_stop = True
+            p(level="warn", text=f"已达预算上限（{budget.reason()}），"
+                                 "安全停止：后续分P不再抓取")
+            break
         try:
             pm = meta if n == meta["page"] else core.fetch_video_meta(
-                bvid=bvid, aid=aid, page=n, cancel=cancel)
+                bvid=bvid, aid=aid, page=n, cancel=cancel, budget=budget)
         except TaskCancelledError:
             cancelled = True
+            break
+        except BudgetExhaustedError:
+            budget_stop = True
             break
         p(text=f"—— P{n}/{page_count}"
                + (f" {pm.get('part')}" if pm.get("part") else "")
@@ -79,7 +108,8 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
             pm["cid"], out_path, duration=pm["duration"],
             max_segments=max_segments, sleep=sleep, progress=p,
             cancel=lambda: bool(cancel and cancel()),
-            name=f"{label}_P{n}", page=n, part=pm.get("part") or "")
+            name=f"{label}_P{n}", page=n, part=pm.get("part") or "",
+            budget=budget)
         st = crawler.crawl()
         rows.extend(crawler.rows)
         parts.append({"page": n, "part": pm.get("part") or "",
@@ -88,7 +118,8 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
                       "expected_segments": st.get("expected_segments"),
                       "duplicates": st.get("duplicates", 0),
                       "cancelled": st.get("cancelled", False),
-                      "truncated": st.get("truncated", False)})
+                      "truncated": st.get("truncated", False),
+                      "stopped_reason": st.get("stopped_reason")})
         if st.get("cancelled"):
             cancelled = True
             break
@@ -102,7 +133,11 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
     multi = len(parts) > 1
     stats = _merge_stats(parts)
     stats["cancelled"] = stats["cancelled"] or cancelled
-    if not rows and not stats["cancelled"] and meta["claimed_danmaku"] > 0:
+    if budget_stop:
+        stats["stopped_reason"] = "budget_reached"
+    if (not rows and not stats["cancelled"]
+            and not stats.get("stopped_reason")
+            and meta["claimed_danmaku"] > 0):
         raise core.DanmakuUnavailable(
             f"一条弹幕都没抓到，但视频接口自称有 {meta['claimed_danmaku']:,} 条。"
             "通常是被限流降级——降级响应与「该视频真的没有弹幕」完全一样，"
@@ -170,17 +205,39 @@ def _cancelled_before_meta(bvid, aid, out_dir):
     }
 
 
+def _budget_stopped_before_meta(bvid, aid, out_dir):
+    """meta 请求阶段被预算拦下：返回正常的预算停止结果而不是抛到 GUI 失败槽。"""
+    label = bvid or f"av{aid}"
+    stats = _merge_stats([])
+    stats["stopped_reason"] = "budget_reached"
+    return {
+        "label": label,
+        "cid": None,
+        "xlsx": "",
+        "report": "",
+        "jsonl": "",
+        "jsonl_files": [],
+        "dir": str(Path(out_dir) / f"弹幕_{label}"),
+        "rows": 0,
+        "stats": stats,
+        "meta": {},
+        "parts": [],
+        "analysis": {},
+    }
+
+
 def _merge_stats(parts):
     """各分P stats 合并成一份任务级统计，供概览页使用。
 
     截断/取消是"或"不是"和"：只要有一个分P没抓全，整份导出就不能印"已抓到底"。
-    段数与预期段数则是求和——多分P的概览说的是合计口径。
+    段数与预期段数则是求和——多分P的概览说的是合计口径。预算停止同样是"或"：
+    任一分P到限即整任务按预算停止收尾。
     """
     if not parts:
         return {"segments": 0, "duplicates": 0, "cancelled": False,
                 "truncated": False, "expected_segments": None}
     expects = [p["expected_segments"] for p in parts]
-    return {
+    merged = {
         "segments": sum(p["segments"] for p in parts),
         "duplicates": sum(p["duplicates"] for p in parts),
         "cancelled": any(p["cancelled"] for p in parts),
@@ -188,3 +245,6 @@ def _merge_stats(parts):
         "expected_segments": (sum(e for e in expects if e is not None)
                               if all(e is not None for e in expects) else None),
     }
+    if any(p.get("stopped_reason") == "budget_reached" for p in parts):
+        merged["stopped_reason"] = "budget_reached"
+    return merged

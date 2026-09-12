@@ -12,6 +12,7 @@ from datetime import datetime
 from pathlib import Path
 
 from core import session
+from core.budget import BudgetExhaustedError
 from core.cancel import TaskCancelledError, wait as wait_or_cancel
 from core.risk import RiskChallengeError  # noqa: F401  供 pipeline 引用
 from core import xlsx as xlsx_mod
@@ -25,9 +26,14 @@ except ImportError:  # noqa: F841
 
 # ============================ 采集 ============================
 
-def fetch_view(bvid, cancel=None):
+def fetch_view(bvid, cancel=None, budget=None):
+    """取一份视频公开数据快照。budget 非 None 时透传任务预算
+    （强制点在 HTTP 层入口），为 None 时调用与旧路径逐字节一致。"""
+    kwargs = {"cancel": cancel}
+    if budget is not None:
+        kwargs["budget"] = budget
     d = session.http_get_json(
-        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}", cancel=cancel)
+        f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}", **kwargs)
     if d.get("code") != 0:
         raise ValueError(f"{bvid}: code={d.get('code')} {d.get('message')}")
     v = d["data"]
@@ -48,28 +54,42 @@ def fetch_view(bvid, cancel=None):
     }
 
 
-def collect_snapshot(bvids, sleep=0.3, progress=None, cancel=None, snapshot_path=None):
+def collect_snapshot(bvids, sleep=0.3, progress=None, cancel=None,
+                     snapshot_path=None, budget=None):
     """逐视频采集一份快照；返回 (成功列表, 失败列表[(bvid, err)])。
 
     cancel 会一路透传到请求内部：不仅在本循环间生效，也能打断 BiliClient 的
     退避等待。取消属主动行为，不计入失败列表——干净收尾并返回已采到的部分。
+
+    budget 为任务预算（core.budget.TaskBudget），None = 无预算。视频循环
+    边界查 expired()；请求在 HTTP 层入口被预算硬拦时同样按正常收尾处理
+    （break，不计入失败列表），落盘后以快照条数记账 observe_records(1)。
     """
     ok, fail = [], []
     total = len(bvids)
     for i, bv in enumerate(bvids, 1):
         if cancel and cancel():
             break
+        if budget is not None and budget.expired():
+            break
         try:
-            snap = fetch_view(bv, cancel=cancel)
+            kwargs = {"cancel": cancel}
+            if budget is not None:
+                kwargs["budget"] = budget
+            snap = fetch_view(bv, **kwargs)
             ok.append(snap)
             if snapshot_path:
                 with open(snapshot_path, "a", encoding="utf-8") as fh:
                     fh.write(json.dumps(snap, ensure_ascii=False) + "\n")
+            if budget is not None:
+                budget.observe_records(1)
         except RiskChallengeError as e:
             e.resume_index = i - 1  # 断点：下一轮从此视频续采（0-based）
             raise
         except TaskCancelledError:
             break                   # 退避途中被取消：不是失败，直接收尾
+        except BudgetExhaustedError:
+            break                   # 预算硬拦：正常完成语义，不是失败
         except Exception as e:  # noqa: BLE001
             fail.append((bv, str(e)[:80]))
         if progress:

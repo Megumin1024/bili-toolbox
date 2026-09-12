@@ -273,7 +273,8 @@ class PipelineRoundBoundaryTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def expand(self, _line, progress=None):
+    def expand(self, _line, progress=None, **kwargs):
+        # **kwargs：真实调用会透传 cancel/budget（links 闸门收口后新增），fake 不关心
         return [(bvid, "") for bvid in self.bvids]
 
     def run_pipeline_case(self, collect, capture_export=None, **kwargs):

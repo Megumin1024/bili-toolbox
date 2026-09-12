@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QLineEdit)
 from app.task_page import TaskPage
 from app.widgets import PathRow, muted
 from core import output as output_mod
+from core.budget import (DEFAULT_MAX_MINUTES, DEFAULT_MAX_REQUESTS,
+                         MAX_MINUTES_LIMIT, MAX_REQUESTS_LIMIT)
 
 from . import core
 from .pipeline import run_pipeline
@@ -47,6 +49,16 @@ class UserDynamicsPage(TaskPage):
             f"页间隔秒（默认 {core.DEFAULT_SLEEP}）")
         form.addRow("限速(秒/页)", self.sleep_edit)
 
+        self.max_requests_edit = QLineEdit(str(DEFAULT_MAX_REQUESTS))
+        self.max_requests_edit.setPlaceholderText(
+            f"本次任务最多发多少次请求（1–{MAX_REQUESTS_LIMIT:,}），到限安全停止")
+        form.addRow("请求数上限", self.max_requests_edit)
+
+        self.max_minutes_edit = QLineEdit(str(DEFAULT_MAX_MINUTES))
+        self.max_minutes_edit.setPlaceholderText(
+            f"任务最长运行多少分钟（1–{MAX_MINUTES_LIMIT:,}），到限安全停止")
+        form.addRow("时长上限(分钟)", self.max_minutes_edit)
+
         self.auto_open = QCheckBox("完成后自动打开 Excel")
         self.auto_open.setChecked(True)
         form.addRow("", self.auto_open)
@@ -85,12 +97,21 @@ class UserDynamicsPage(TaskPage):
                                    or core.DEFAULT_SLEEP))
         except ValueError:
             raise ValueError("限速需为数字（秒/页）")
-        return target, uid, out_dir, max_pages, sleep
+        max_requests = self._parse_int(
+            self.max_requests_edit.text(), "请求数上限",
+            DEFAULT_MAX_REQUESTS, 1, MAX_REQUESTS_LIMIT)
+        max_minutes = self._parse_int(
+            self.max_minutes_edit.text(), "时长上限",
+            DEFAULT_MAX_MINUTES, 1, MAX_MINUTES_LIMIT)
+        return (target, uid, out_dir, max_pages, sleep,
+                max_requests, max_minutes)
 
     def collect_params(self):
-        target, _uid, out_dir, max_pages, sleep = self._read()
+        (target, _uid, out_dir, max_pages, sleep,
+         max_requests, max_minutes) = self._read()
         return {"target": target, "out_dir": out_dir, "max_pages": max_pages,
-                "sleep": sleep, "open_result": self.auto_open.isChecked()}
+                "sleep": sleep, "open_result": self.auto_open.isChecked(),
+                "max_requests": max_requests, "max_minutes": max_minutes}
 
     def collect_preset_params(self):
         return self.collect_params()
@@ -100,6 +121,10 @@ class UserDynamicsPage(TaskPage):
         self.out_row.set_value(params.get("out_dir", ""))
         self.pages_edit.setText(str(params.get("max_pages", core.DEFAULT_MAX_PAGES)))
         self.sleep_edit.setText(str(params.get("sleep", core.DEFAULT_SLEEP)))
+        self.max_requests_edit.setText(
+            str(params.get("max_requests", DEFAULT_MAX_REQUESTS)))
+        self.max_minutes_edit.setText(
+            str(params.get("max_minutes", DEFAULT_MAX_MINUTES)))
         self.auto_open.setChecked(bool(params.get("open_result", True)))
         self.uid_edit.setFocus()
 
@@ -122,6 +147,8 @@ class UserDynamicsPage(TaskPage):
             "max_pages": params.get("max_pages", core.DEFAULT_MAX_PAGES),
             "sleep": params.get("sleep", core.DEFAULT_SLEEP),
             "open_result": bool(params.get("open_result", True)),
+            "max_requests": params.get("max_requests", DEFAULT_MAX_REQUESTS),
+            "max_minutes": params.get("max_minutes", DEFAULT_MAX_MINUTES),
         }
 
     def history_output_paths(self, result):
@@ -131,7 +158,12 @@ class UserDynamicsPage(TaskPage):
 
     def on_finished(self, result):
         stats = result.get("stats") or {}
-        tail = "（已达页数上限，可能还有更早的动态）" if stats.get("truncated") else ""
+        if stats.get("stopped_reason") == "budget_reached":
+            tail = "（已达上限安全停止）"
+        elif stats.get("truncated"):
+            tail = "（已达页数上限，可能还有更早的动态）"
+        else:
+            tail = ""
         self.result_card.show_result(
             f"完成 ✓ 共 {result['rows']:,} 条动态{tail}",
             [("Excel 报告", result["xlsx"]),

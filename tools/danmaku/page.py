@@ -8,6 +8,8 @@ from PySide6.QtWidgets import (QCheckBox, QFormLayout, QLineEdit)
 from app.task_page import TaskPage
 from app.widgets import PathRow, muted
 from core import output as output_mod
+from core.budget import (DEFAULT_MAX_MINUTES, DEFAULT_MAX_REQUESTS,
+                         MAX_MINUTES_LIMIT, MAX_REQUESTS_LIMIT)
 
 from . import core
 from .pipeline import run_pipeline
@@ -46,6 +48,16 @@ class DanmakuPage(TaskPage):
         self.sleep_edit = QLineEdit(str(core.DEFAULT_SLEEP))
         self.sleep_edit.setPlaceholderText(f"段间隔秒（默认 {core.DEFAULT_SLEEP}）")
         form.addRow("限速(秒/段)", self.sleep_edit)
+
+        self.max_requests_edit = QLineEdit(str(DEFAULT_MAX_REQUESTS))
+        self.max_requests_edit.setPlaceholderText(
+            f"本次任务最多发多少次请求（1–{MAX_REQUESTS_LIMIT:,}），到限安全停止")
+        form.addRow("请求数上限", self.max_requests_edit)
+
+        self.max_minutes_edit = QLineEdit(str(DEFAULT_MAX_MINUTES))
+        self.max_minutes_edit.setPlaceholderText(
+            f"任务最长运行多少分钟（1–{MAX_MINUTES_LIMIT:,}），到限安全停止")
+        form.addRow("时长上限(分钟)", self.max_minutes_edit)
 
         self.all_pages = QCheckBox("抓取全部分P（多分P视频串行抓完，耗时更长）")
         form.addRow("", self.all_pages)
@@ -90,14 +102,22 @@ class DanmakuPage(TaskPage):
                                    or core.DEFAULT_SLEEP))
         except ValueError:
             raise ValueError("限速需为数字（秒/段）")
-        return target, out_dir, max_segments, sleep
+        max_requests = self._parse_int(
+            self.max_requests_edit.text(), "请求数上限",
+            DEFAULT_MAX_REQUESTS, 1, MAX_REQUESTS_LIMIT)
+        max_minutes = self._parse_int(
+            self.max_minutes_edit.text(), "时长上限",
+            DEFAULT_MAX_MINUTES, 1, MAX_MINUTES_LIMIT)
+        return target, out_dir, max_segments, sleep, max_requests, max_minutes
 
     def collect_params(self):
-        target, out_dir, max_segments, sleep = self._read()
+        (target, out_dir, max_segments, sleep,
+         max_requests, max_minutes) = self._read()
         return {"target": target, "out_dir": out_dir,
                 "max_segments": max_segments, "sleep": sleep,
                 "all_pages": self.all_pages.isChecked(),
-                "open_result": self.auto_open.isChecked()}
+                "open_result": self.auto_open.isChecked(),
+                "max_requests": max_requests, "max_minutes": max_minutes}
 
     def collect_preset_params(self):
         return self.collect_params()
@@ -108,6 +128,10 @@ class DanmakuPage(TaskPage):
         self.segments_edit.setText(
             str(params.get("max_segments", core.DEFAULT_MAX_SEGMENTS)))
         self.sleep_edit.setText(str(params.get("sleep", core.DEFAULT_SLEEP)))
+        self.max_requests_edit.setText(
+            str(params.get("max_requests", DEFAULT_MAX_REQUESTS)))
+        self.max_minutes_edit.setText(
+            str(params.get("max_minutes", DEFAULT_MAX_MINUTES)))
         self.all_pages.setChecked(bool(params.get("all_pages", False)))
         self.auto_open.setChecked(bool(params.get("open_result", True)))
         self.target_edit.setFocus()
@@ -134,6 +158,8 @@ class DanmakuPage(TaskPage):
             "sleep": params.get("sleep", core.DEFAULT_SLEEP),
             "all_pages": bool(params.get("all_pages", False)),
             "open_result": bool(params.get("open_result", True)),
+            "max_requests": params.get("max_requests", DEFAULT_MAX_REQUESTS),
+            "max_minutes": params.get("max_minutes", DEFAULT_MAX_MINUTES),
         }
 
     def history_output_paths(self, result):
@@ -147,7 +173,12 @@ class DanmakuPage(TaskPage):
     def on_finished(self, result):
         stats = result.get("stats") or {}
         parts = result.get("parts") or []
-        tail = "（已达段数上限，可能还有更多）" if stats.get("truncated") else ""
+        if stats.get("stopped_reason") == "budget_reached":
+            tail = "（已达上限安全停止）"
+        elif stats.get("truncated"):
+            tail = "（已达段数上限，可能还有更多）"
+        else:
+            tail = ""
         scope = f" · {len(parts)} 个分P" if len(parts) > 1 else ""
         jsonl_label = "原始数据(jsonl)" if len(parts) <= 1 else "原始数据(jsonl 目录)"
         links = [("Excel 报告", result["xlsx"])]
