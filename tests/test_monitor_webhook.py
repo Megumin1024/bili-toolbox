@@ -15,6 +15,7 @@ import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import parse_qs
 
 from core import config as app_config
 from core import task_history
@@ -22,7 +23,8 @@ from tools.monitor.alerts import (AlertConfig, AlertEvent, AlertSession,
                                   WebhookRateLimiter)
 from tools.monitor.notifications import (WEBHOOK_TIMEOUT_SECONDS,
                                          RecordingNotificationAdapter,
-                                         WebhookAdapter, webhook_payload)
+                                         WebhookAdapter, _post_serverchan,
+                                         serverchan_url, webhook_payload)
 from tools.monitor.page import MonitorPage
 
 
@@ -55,6 +57,35 @@ class SenderStub:
         if self.error is not None:
             raise self.error
         return self.status
+
+    def wait_calls(self, count, timeout=5.0):
+        deadline = time.time() + timeout
+        with self._cond:
+            while len(self.calls) < count:
+                remaining = deadline - time.time()
+                if remaining <= 0 or not self._cond.wait(remaining):
+                    break
+            return list(self.calls)
+
+
+class ServerChanSenderStub:
+    """线程安全 sender 桩：ServerChan 契约，返回 (status, code, message)。"""
+
+    def __init__(self, status=200, code=0, message="ok", error=None):
+        self.status = status
+        self.code = code
+        self.message = message
+        self.error = error
+        self.calls = []
+        self._cond = threading.Condition()
+
+    def __call__(self, url, body, timeout):
+        with self._cond:
+            self.calls.append((url, body))
+            self._cond.notify_all()
+        if self.error is not None:
+            raise self.error
+        return (self.status, self.code, self.message)
 
     def wait_calls(self, count, timeout=5.0):
         deadline = time.time() + timeout
@@ -589,6 +620,235 @@ class PersistenceBoundaryTests(QtEnvironmentTestCase):
         self.assertEqual(mapping["webhook_enabled"], True)
         self.assertEqual(
             AlertConfig.from_mapping(mapping).webhook_enabled, True)
+
+
+class ServerChanUrlNormalizationTests(unittest.TestCase):
+    """serverchan_url 纯函数：三种输入形态与拒绝边界。"""
+
+    def test_bare_sendkey_wrapped_and_trimmed(self):
+        self.assertEqual(
+            serverchan_url("SCUabcdef12"), "https://sctapi.ftqq.com/SCUabcdef12.send")
+        self.assertEqual(
+            serverchan_url("  SCUabcdef12 "),
+            "https://sctapi.ftqq.com/SCUabcdef12.send")
+
+    def test_full_send_url_used_as_is(self):
+        url = "https://sctapi.ftqq.com/SCUabcdef12.send"
+        self.assertEqual(serverchan_url(url), url)
+        # 原样使用：大小写与查询参数都保留，不重写
+        upper = "HTTP://SCTAPI.FTQQ.COM/SCUabcdef12.SEND"
+        self.assertEqual(serverchan_url(upper), upper)
+        with_query = "https://sctapi.ftqq.com/SCUabcdef12.send?channel=monitor"
+        self.assertEqual(serverchan_url(with_query), with_query)
+
+    def test_rejected_forms(self):
+        for bad in ("", "   ", None, "short", "SCU短", "abc.def",
+                    "key with space", "sctapi.ftqq.com/SCUabcdef12.send",
+                    "ftp://sctapi.ftqq.com/SCUabcdef12.send",
+                    "https://example.com/SCUabcdef12.send",
+                    "https://sctapi.ftqq.com.evil.com/SCUabcdef12.send",
+                    "https://sctapi.ftqq.com/SCUabcdef12"):
+            self.assertIsNone(serverchan_url(bad), repr(bad))
+
+
+class ServerChanSendBranchTests(unittest.TestCase):
+    """Server酱 发送分支：归一化、form 编码、format 发送时读取、频控共享。
+
+    全部离线：sender 为注入桩，不创建真实网络连接。
+    """
+
+    def _serverchan_adapter(self, url, stub, log=None, **kwargs):
+        return WebhookAdapter(
+            url_getter=lambda: url, format_getter=lambda: "serverchan",
+            log=log or (lambda _message: None), serverchan_sender=stub,
+            **kwargs)
+
+    def test_unrecognized_input_zero_action_and_input_not_logged(self):
+        for bad in ("https://example.com/hook", "abc.def", "SCU短"):
+            stub = ServerChanSenderStub()
+            logs = []
+            adapter = self._serverchan_adapter(bad, stub, log=logs.append)
+            before_threads = threading.active_count()
+            self.assertFalse(adapter.send("test", "标题", "内容"))
+            self.assertEqual(stub.calls, [])
+            self.assertEqual(threading.active_count(), before_threads)
+            self.assertTrue(
+                any("Server酱密钥格式不认识" in message for message in logs))
+            # 原始输入可能就是 SendKey，绝不回显进日志
+            self.assertTrue(all(bad not in message for message in logs))
+
+    def test_form_body_keys_exactly_title_desp_and_sanitized(self):
+        stub = ServerChanSenderStub()
+        adapter = self._serverchan_adapter(
+            "SCUabcdef12", stub)
+        self.assertTrue(adapter.send(
+            "milestone", "播放量里程碑", "password=abc123 通知"))
+        url, body = stub.wait_calls(1)[0]
+        self.assertEqual(url, "https://sctapi.ftqq.com/SCUabcdef12.send")
+        parsed = parse_qs(body.decode("utf-8"))
+        self.assertEqual(set(parsed), {"title", "desp"})
+        self.assertEqual(parsed["title"], ["播放量里程碑"])
+        self.assertEqual(parsed["desp"], ["password=[已脱敏] 通知"])
+        self.assertNotIn(b"abc123", body)
+
+    def test_format_read_at_send_time_switch_takes_effect(self):
+        fmt = ["json"]
+        json_stub = SenderStub()
+        sc_stub = ServerChanSenderStub()
+        adapter = WebhookAdapter(
+            url_getter=lambda: "https://sctapi.ftqq.com/SCUabcdef12.send",
+            format_getter=lambda: fmt[0], log=lambda _message: None,
+            sender=json_stub, serverchan_sender=sc_stub)
+        self.assertTrue(adapter.send("test", "标题", "内容"))
+        self.assertEqual(len(json_stub.wait_calls(1)), 1)
+        self.assertEqual(sc_stub.calls, [])
+        fmt[0] = "serverchan"  # 切换下拉：不重建适配器，下一发即时生效
+        self.assertTrue(adapter.send("test", "标题", "内容"))
+        calls = sc_stub.wait_calls(1)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0][1].startswith(b"title="))
+        self.assertEqual(len(json_stub.calls), 1)
+
+    def test_invalid_format_value_falls_back_to_json(self):
+        stub = SenderStub()
+        adapter = WebhookAdapter(
+            url_getter=lambda: "http://127.0.0.1:9/hook",
+            format_getter=lambda: "dingtalk", log=lambda _message: None,
+            sender=stub)
+        self.assertTrue(adapter.send("test", "标题", "内容"))
+        body = stub.wait_calls(1)[0][1]
+        self.assertTrue(body.startswith(b"{"))
+
+    def test_serverchan_shares_rate_limit_budget(self):
+        clock = FakeClock()
+        stub = ServerChanSenderStub()
+        logs = []
+        adapter = self._serverchan_adapter(
+            "SCUabcdef12", stub, log=logs.append, clock=clock,
+            rate_limiter=WebhookRateLimiter(
+                limit=1, window_seconds=3600, clock=clock))
+        self.assertTrue(adapter.send("test", "t", "m"))
+        self.assertEqual(len(stub.wait_calls(1)), 1)
+        self.assertFalse(adapter.send("test", "t", "m"))
+        self.assertTrue(any("本小时已丢弃 1 条" in message for message in logs))
+        self.assertEqual(len(stub.calls), 1)
+
+    def test_serverchan_success_and_code_failures_logged(self):
+        stub = ServerChanSenderStub(status=200, code=0, message="ok")
+        logs = []
+        adapter = self._serverchan_adapter("SCUabcdef12", stub,
+                                           log=logs.append)
+        self.assertTrue(adapter.send("test", "标题", "内容"))
+        stub.wait_calls(1)
+        self.assertTrue(any("Server酱 推送已发送" in message
+                            for message in logs))
+
+        stub = ServerChanSenderStub(status=200, code=40001,
+                                    message="key错误")
+        logs = []
+        adapter = self._serverchan_adapter("SCUabcdef12", stub,
+                                           log=logs.append)
+        self.assertTrue(adapter.send("test", "标题", "内容"))
+        stub.wait_calls(1)
+        self.assertTrue(any(
+            "Server酱 推送失败" in message and "code=40001" in message
+            and "key错误" in message for message in logs))
+        self.assertFalse(any("推送已发送" in message for message in logs))
+
+
+class WebhookFormatPersistenceTests(QtEnvironmentTestCase):
+    """webhook_format 的 config 往返、非法值回退与预设/历史边界。"""
+
+    def test_config_defaults_and_roundtrip(self):
+        self.assertEqual(app_config.DEFAULTS.get("webhook_format"), "json")
+        with tempfile.TemporaryDirectory(prefix="webhook_fmt_") as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            target.write_text(
+                json.dumps({"theme": "light", "webhook_url": "u"}),
+                encoding="utf-8")
+            with patch.object(app_config, "CONFIG_DIR", root), \
+                    patch.object(app_config, "CONFIG_FILE", target):
+                cfg = app_config.load()
+                self.assertEqual(cfg.get("webhook_format"), "json")
+                self.assertEqual(cfg.get("theme"), "light")
+                app_config.save({"webhook_format": "serverchan"})
+                reloaded = app_config.load()
+            self.assertEqual(reloaded.get("webhook_format"), "serverchan")
+            self.assertEqual(reloaded.get("theme"), "light")
+            self.assertEqual(reloaded.get("webhook_url"), "u")
+            self.assertEqual(
+                sorted(p.name for p in root.glob(".config.json.*.tmp")), [])
+
+    def test_invalid_config_format_falls_back_to_json(self):
+        page = MonitorPage({"out_dir": "", "webhook_format": "dingtalk"})
+        self.assertEqual(page.webhook_format_combo.currentData(), "json")
+        self.assertEqual(page._webhook_format_value(), "json")
+        self.assertEqual(
+            page.webhook_url_edit.placeholderText(),
+            "https://…（接收端 URL，仅保存在本机配置文件）")
+        page.on_app_close()
+
+    def test_format_combo_roundtrip_and_placeholder_switch(self):
+        with tempfile.TemporaryDirectory(prefix="webhook_fmt_") as tmp:
+            root = Path(tmp)
+            target = root / "config.json"
+            with patch.object(app_config, "CONFIG_DIR", root), \
+                    patch.object(app_config, "CONFIG_FILE", target):
+                page = MonitorPage({"out_dir": ""})
+                self.assertEqual(
+                    page.webhook_format_combo.currentData(), "json")
+                page.webhook_format_combo.setCurrentIndex(1)
+                self.assertEqual(page._webhook_format_value(), "serverchan")
+                self.assertEqual(
+                    json.loads(target.read_text(encoding="utf-8"))
+                    .get("webhook_format"), "serverchan")
+                self.assertEqual(
+                    page.webhook_url_edit.placeholderText(),
+                    "填 SendKey 或 .send 完整链接（仅保存在本机配置文件）")
+                self.assertEqual(
+                    app_config.load().get("webhook_format"), "serverchan")
+                page.webhook_format_combo.setCurrentIndex(0)
+                self.assertEqual(
+                    app_config.load().get("webhook_format"), "json")
+                page.on_app_close()
+            self.assertEqual(
+                sorted(p.name for p in root.glob(".config.json.*.tmp")), [])
+
+    def test_default_adapter_reads_format_at_send_time(self):
+        with tempfile.TemporaryDirectory(prefix="webhook_fmt_") as tmp:
+            root = Path(tmp)
+            with patch.object(app_config, "CONFIG_DIR", root), \
+                    patch.object(app_config, "CONFIG_FILE", root / "config.json"):
+                page = MonitorPage({"out_dir": ""})
+                adapter = page._new_webhook_adapter()
+                self.assertEqual(adapter._format(), "json")
+                page.webhook_format_combo.setCurrentIndex(1)
+                # 不重建适配器：格式 getter 在每次发送时读取下拉当前值
+                self.assertEqual(adapter._format(), "serverchan")
+                page.on_app_close()
+
+    def test_format_combo_follows_channel_switch(self):
+        page = MonitorPage({"out_dir": ""})
+        self.assertFalse(page.webhook_format_combo.isEnabled())
+        page.alert_webhook_check.setChecked(True)
+        self.assertTrue(page.webhook_format_combo.isEnabled())
+        page.alert_webhook_check.setChecked(False)
+        self.assertFalse(page.webhook_format_combo.isEnabled())
+        page.on_app_close()
+
+    def test_format_never_enters_presets(self):
+        with tempfile.TemporaryDirectory(prefix="webhook_fmt_") as tmp:
+            root = Path(tmp)
+            with patch.object(app_config, "CONFIG_DIR", root), \
+                    patch.object(app_config, "CONFIG_FILE", root / "config.json"):
+                page = MonitorPage({"out_dir": ""})
+                page.webhook_format_combo.setCurrentIndex(1)
+                params = page.collect_preset_params()
+                self.assertNotIn("webhook_format", params)
+                self.assertNotIn(
+                    "webhook_format", json.dumps(params, ensure_ascii=False))
+                page.on_app_close()
 
 
 def tearDownModule():

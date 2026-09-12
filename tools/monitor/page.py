@@ -21,7 +21,8 @@ from core import config as app_config
 from core.output import app_base_dir
 
 from .alerts import AlertConfig, AlertEvent, AlertSession, milestones_text
-from .notifications import QtNotificationAdapter, WebhookAdapter
+from .notifications import (WEBHOOK_FORMATS, QtNotificationAdapter,
+                            WebhookAdapter)
 from .server import MonitorServer
 
 
@@ -118,28 +119,38 @@ class MonitorPage(QWidget):
         channel_row.addStretch(1)
         alert_layout.addLayout(channel_row)
 
-        # Webhook 渠道独占一行（复选框 + URL + 测试按钮），避免给告警卡
+        # Webhook 渠道独占一行（复选框 + 格式 + URL + 测试按钮），避免给告警卡
         # 再增一行高度——960×640 下卡片高度本就贴近视口上限。
         webhook_row = QHBoxLayout()
         webhook_row.setSpacing(8)
         self.alert_webhook_check = QCheckBox("Webhook 推送")
         self.alert_webhook_check.setChecked(False)
+        self.webhook_format_combo = QComboBox()
+        for val, label in (("json", "通用 JSON"), ("serverchan", "Server酱")):
+            self.webhook_format_combo.addItem(label, val)
+        # 先设初值再连信号：初始化阶段不得触发保存（此时 URL 控件还不存在）。
+        self.webhook_format_combo.setCurrentIndex(max(
+            0, self.webhook_format_combo.findData(
+                str(self.cfg.get("webhook_format") or "json"))))
+        self.webhook_format_combo.currentIndexChanged.connect(
+            self._on_webhook_format_changed)
         self.webhook_url_edit = QLineEdit()
-        self.webhook_url_edit.setPlaceholderText(
-            "https://…（接收端 URL，仅保存在本机配置文件）")
+        self.webhook_url_edit.setPlaceholderText(self._webhook_placeholder())
         self.webhook_url_edit.setText(str(self.cfg.get("webhook_url") or ""))
         self.webhook_url_edit.editingFinished.connect(self._save_webhook_url)
         self.btn_test_webhook = QPushButton("发送测试")
         self.btn_test_webhook.setObjectName("flat")
         self.btn_test_webhook.clicked.connect(self.on_test_webhook)
         webhook_row.addWidget(self.alert_webhook_check)
+        webhook_row.addWidget(self.webhook_format_combo)
         webhook_row.addWidget(self.webhook_url_edit, 1)
         webhook_row.addWidget(self.btn_test_webhook)
         alert_layout.addLayout(webhook_row)
         alert_layout.addWidget(muted(
-            "POST JSON：{title, text, event_type}；用于 Server酱/Bark/企业微信等"
-            "需自建中转或支持通用 JSON 的服务。每小时最多推送 10 条，"
-            "URL 只保存在本机、不进入任务历史与预设。"))
+            "通用 JSON：POST {title, text, event_type}；Server酱：POST 表单 "
+            "title/desp 到 sctapi.ftqq.com，HTTP 2xx 且 code==0 算成功。"
+            "每小时最多推送 10 条，SendKey 与 URL 只保存在本机、"
+            "不进入任务历史与预设。"))
 
         rule_grid = QGridLayout()
         rule_grid.setHorizontalSpacing(10)
@@ -322,6 +333,7 @@ class MonitorPage(QWidget):
             return factory()
         return WebhookAdapter(
             url_getter=self.webhook_url_edit.text,
+            format_getter=self._webhook_format_value,
             log=self.webhook_log.emit,
         )
 
@@ -355,6 +367,28 @@ class MonitorPage(QWidget):
             return
         self.cfg["webhook_url"] = url
         app_config.save({"webhook_url": url})
+
+    def _webhook_format_value(self) -> str:
+        """下拉当前格式；未知值回退通用 JSON（config 层只做键白名单）。"""
+        data = self.webhook_format_combo.currentData()
+        return data if data in WEBHOOK_FORMATS else "json"
+
+    def _webhook_placeholder(self) -> str:
+        if self._webhook_format_value() == "serverchan":
+            return "填 SendKey 或 .send 完整链接（仅保存在本机配置文件）"
+        return "https://…（接收端 URL，仅保存在本机配置文件）"
+
+    def _on_webhook_format_changed(self):
+        self.webhook_url_edit.setPlaceholderText(self._webhook_placeholder())
+        self._save_webhook_format()
+
+    def _save_webhook_format(self):
+        """格式与 webhook_url 同模式：最小字段、只落 config.json。"""
+        value = self._webhook_format_value()
+        if self.cfg.get("webhook_format") == value:
+            return
+        self.cfg["webhook_format"] = value
+        app_config.save({"webhook_format": value})
 
     def _alert_mapping_from_controls(self):
         return AlertConfig.from_mapping({
@@ -410,6 +444,7 @@ class MonitorPage(QWidget):
         self.alert_disconnect_failures_spin.setEnabled(
             self.alert_disconnect_check.isChecked())
         webhook_on = self.alert_webhook_check.isChecked()
+        self.webhook_format_combo.setEnabled(webhook_on)
         self.webhook_url_edit.setEnabled(webhook_on)
         self.btn_test_webhook.setEnabled(webhook_on)
 

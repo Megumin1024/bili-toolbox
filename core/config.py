@@ -15,6 +15,7 @@ DEFAULTS = {
     "proxy_spec": "",     # 例: "direct,socks5://127.0.0.1:7890,http://u:p@1.2.3.4:8080"
     "transport": "auto",  # auto | h2-ja3 | urllib
     "webhook_url": "",    # 监控告警 Webhook 推送接收端；只存本机，绝不进历史/预设/日志原文
+    "webhook_format": "json",  # 监控 Webhook 格式：json=通用 JSON | serverchan=Server酱
 }
 
 
