@@ -6,6 +6,7 @@ from .collector.page import CollectorPage
 from .comments.page import CommentsPage
 from .danmaku.page import DanmakuPage
 from .data_check.page import DataCheckPage
+from .live_room.page import LiveRoomPage
 from .monitor.page import MonitorPage
 from .relation_analysis.page import RelationAnalysisPage
 from .report_center.page import ReportCenterPage
@@ -36,4 +37,7 @@ TOOLS = [
     ToolSpec(id="relation_analysis", name="关系分析",
              subtitle="本地粉丝/关注清单分析 → 互关/快照差异 → Excel（零网络）",
              icon="fa5s.users", factory=RelationAnalysisPage),
+    ToolSpec(id="live_room", name="直播追踪",
+             subtitle="输入直播间号/链接 → 快照/轮询追踪 + 开播提醒 → Excel（游客可用）",
+             icon="fa5s.video", factory=LiveRoomPage),
 ]

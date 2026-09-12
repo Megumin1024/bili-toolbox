@@ -126,6 +126,11 @@ SHOTS = [
     ("dark", IDX["relation_analysis"], (1440, 900), "relation-analysis-dark.png", "idle"),
     ("light", IDX["relation_analysis"], (960, 640), "relation-analysis-compact.png", "idle"),
     ("dark", IDX["relation_analysis"], (960, 640), "relation-analysis-compact-dark.png", "idle"),
+    # 直播追踪（第 9 个工具，HTTP 轮询 + 开播提醒）
+    ("light", IDX["live_room"], (1440, 900), "live-room.png", "idle"),
+    ("dark", IDX["live_room"], (1440, 900), "live-room-dark.png", "idle"),
+    ("light", IDX["live_room"], (960, 640), "live-room-compact.png", "idle"),
+    ("dark", IDX["live_room"], (960, 640), "live-room-compact-dark.png", "idle"),
     # 设置页固定在全部工具之后
     ("light", SETTINGS_IDX, (1440, 900), "settings.png", "idle"),
     ("dark", SETTINGS_IDX, (1440, 900), "settings-dark.png", "idle"),
@@ -381,7 +386,7 @@ def shoot(index=0):
     if size == (960, 640) and page_index in (
             IDX["collector"], IDX["monitor"], IDX["data_check"],
             IDX["report_center"], IDX["user_dynamics"], IDX["danmaku"],
-            IDX["relation_analysis"], SETTINGS_IDX):
+            IDX["relation_analysis"], IDX["live_room"], SETTINGS_IDX):
         current_page = (settings if page_index == SETTINGS_IDX
                         else win.pages[page_index])
         page_scroll = current_page.findChild(QScrollArea, "pageScroll")

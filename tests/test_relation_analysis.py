@@ -524,10 +524,15 @@ class PipelineTests(BaseTestCase):
 
 class RegistryAndBoundaryTests(unittest.TestCase):
     def test_registered_as_last_tool(self):
-        spec = TOOLS[-1]
-        self.assertEqual(spec.id, "relation_analysis")
-        self.assertEqual(len(TOOLS), 8)
+        # 2026-09-12 直播追踪（live_room）按任务卡以 append 一行注册到末位，
+        # relation_analysis 不再是 TOOLS 的最后一项。这是预期变更：改测试
+        # 而不是改注册顺序——本用例改为锁 relation_analysis 的既有位置
+        # （第 8 位）与注册表总数。
+        spec = next(item for item in TOOLS if item.id == "relation_analysis")
+        self.assertEqual(TOOLS.index(spec), 7)
+        self.assertEqual(len(TOOLS), 9)
         self.assertEqual(spec.name, "关系分析")
+        self.assertEqual(TOOLS[-1].id, "live_room")
 
     def test_subtitle_consistent_between_registry_and_page(self):
         spec = next(item for item in TOOLS if item.id == "relation_analysis")
