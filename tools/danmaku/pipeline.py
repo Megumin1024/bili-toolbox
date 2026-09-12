@@ -10,6 +10,7 @@ core.session：JSON 的走 JSON 通道，弹幕字节走二进制通道，两者
 省几分钟去并发打接口，等于把限速设计作废。
 """
 import os
+import re
 from pathlib import Path
 
 from core.budget import BudgetExhaustedError, TaskBudget
@@ -18,14 +19,54 @@ from core.cancel import TaskCancelledError, wait as cancel_wait
 from . import analysis, core
 
 
+def parse_page_spec(text):
+    """「指定分P」输入 → 升序去重的分P号列表。
+
+    接受逗号分隔的正整数与 a-b 闭区间，可混用（"2,5,8" / "2-4,7"），中英文
+    逗号与多余空白都容忍；重复自动去重、结果升序。解析不出就抛 ValueError
+    ——页面层在任务启动前调用本函数把这类错误拦在参数校验里。空串 / None
+    表示未启用该模式，返回 []。这里只认格式：分P从 1 计数，0 与区间倒序
+    （如 5-2）按参数错误处理；超过视频实际分P数的编号不算解析错误，由
+    run_pipeline 对照页数跳过并告警。
+    """
+    if text is None:
+        return []
+    s = str(text).strip()
+    if not s:
+        return []
+    numbers = []
+    for token in s.replace("，", ",").split(","):
+        token = token.strip()
+        span = re.fullmatch(r"(\d+)\s*-\s*(\d+)", token)
+        if span:
+            lo, hi = int(span.group(1)), int(span.group(2))
+            if lo < 1:
+                raise ValueError(f"分P从 1 开始，「{token}」不是合法区间")
+            if lo > hi:
+                raise ValueError(f"指定分P区间需从小到大：「{token}」")
+            numbers.extend(range(lo, hi + 1))
+            continue
+        if not re.fullmatch(r"\d+", token):
+            raise ValueError(f"指定分P有认不出的写法：「{token}」"
+                             "（示例：2,5,8 或 2-4,7）")
+        n = int(token)
+        if n < 1:
+            raise ValueError(f"分P从 1 开始，收到「{token}」")
+        numbers.append(n)
+    return sorted(set(numbers))
+
+
 def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
                  sleep=core.DEFAULT_SLEEP, cancel=None, progress=None,
-                 open_result=False, all_pages=False,
+                 open_result=False, all_pages=False, pages=None,
                  max_requests=None, max_minutes=None):
     """完整流水线。返回结果 dict。
 
     target 可以是视频链接、BV 号或 av 号（链接可带 ?p=N 指定分P）。
     all_pages=True 时忽略 ?p=N，抓全部分P。
+    pages 为「指定分P」输入（"2,5,8" / "2-4,7"，parse_page_spec 解析），非空
+    时优先级最高：all_pages 与链接 ?p=N 都被忽略；超过实际分P数的编号跳过
+    并告警，全部超界时按"无弹幕"语义收尾（见下）。
     全部抓完一条都没有且视频自称有弹幕时抛 core.DanmakuUnavailable，由
     TaskRunner 走失败通道——不交一份"该视频没有弹幕"的假报告。
 
@@ -63,7 +104,30 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
            f"时长 {core.hhmmss(meta['duration'] * 1000)} · cid={meta['cid']}")
 
     page_count = int(meta.get("page_count") or 1)
-    if all_pages and page_count > 1:
+    page_spec = parse_page_spec(pages)
+    if page_spec:
+        # 「指定分P」优先级最高：同时勾了「全部分P」或链接带了 ?p=N 都以它为准。
+        if all_pages:
+            p(level="warn",
+              text="已同时勾选「抓取全部分P」：以「指定分P」为准，只抓所选分P")
+        targets = [n for n in page_spec if n <= page_count]
+        skipped = [n for n in page_spec if n > page_count]
+        if skipped:
+            shown = "、".join(f"P{n}" for n in skipped[:20])
+            p(level="warn",
+              text=f"指定的分P有 {len(skipped)} 个超出范围（该视频共 "
+                   f"{page_count} 个分P），已跳过：{shown}"
+                   + ("…" if len(skipped) > 20 else ""))
+        if targets:
+            shown = "、".join(f"P{n}" for n in targets[:8])
+            p(text=f"已指定分P：串行抓取 {shown}"
+                   + (f" 等 {len(targets)} 个分P" if len(targets) > 8 else "")
+                   + f"，每 P 之间间隔 {sleep}s")
+        else:
+            p(level="warn",
+              text=f"指定的分P全部超出范围（该视频共 {page_count} 个分P），"
+                   "没有可抓取的分P")
+    elif all_pages and page_count > 1:
         targets = list(range(1, page_count + 1))
         p(text=f"已勾选「抓取全部分P」：将串行抓取 {page_count} 个分P，"
                f"每 P 之间间隔 {sleep}s")
@@ -129,7 +193,8 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
             cancelled = True
             break
 
-    # 循环至少跑一次（targets 恒非空），所以这里 parts 一定非空。
+    # targets 可能为空：「指定分P」全部超出范围时一个分P都不抓（见上），
+    # 其余路径 targets 恒非空、parts 也随之非空。
     multi = len(parts) > 1
     stats = _merge_stats(parts)
     stats["cancelled"] = stats["cancelled"] or cancelled
@@ -138,13 +203,21 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
     if (not rows and not stats["cancelled"]
             and not stats.get("stopped_reason")
             and meta["claimed_danmaku"] > 0):
+        # 一条没抓到而视频自称有弹幕：按现有「无弹幕」语义报错收场。全部超界
+        # 是唯一换说法的情形——"通常是被限流降级"会误导用户去重试一个写错的
+        # 下标；claimed_danmaku 为 0 时两种情形都继续走正常空报告导出。
+        if page_spec and not targets:
+            raise core.DanmakuUnavailable(
+                f"指定的分P全部超出范围：该视频共 {page_count} 个分P，请求的是 "
+                + "、".join(f"P{n}" for n in page_spec[:20])
+                + "，一条弹幕都没抓到。请核对「指定分P」输入。")
         raise core.DanmakuUnavailable(
             f"一条弹幕都没抓到，但视频接口自称有 {meta['claimed_danmaku']:,} 条。"
             "通常是被限流降级——降级响应与「该视频真的没有弹幕」完全一样，"
             "无法区分。请稍后重试，或换一个视频验证接口是否正常。")
 
     name = (f"弹幕_{label}_全部P" if multi
-            else f"弹幕_{label}_P{parts[-1]['page']}")
+            else f"弹幕_{label}_P{parts[-1]['page'] if parts else meta['page']}")
     # 分析是纯本地计算，跟抓取结果无关，放在导出前——Excel 要把它嵌进去。
     # 这一步不产生任何网络请求，也不改变已经落盘的 jsonl。
     ana = analysis.analyze(rows, meta, parts if multi else None)

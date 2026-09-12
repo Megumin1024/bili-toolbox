@@ -129,6 +129,50 @@ class ParseTargetTests(unittest.TestCase):
         m.assert_called_once()
 
 
+class ParsePageSpecTests(unittest.TestCase):
+    """「指定分P」输入解析："2,5,8" / "2-4,7" 混合写法。"""
+
+    def test_plain_list(self):
+        self.assertEqual(pipeline.parse_page_spec("2,5,8"), [2, 5, 8])
+
+    def test_range_mixed_with_numbers(self):
+        self.assertEqual(pipeline.parse_page_spec("2-4,7"), [2, 3, 4, 7])
+
+    def test_duplicates_are_deduped_and_sorted(self):
+        self.assertEqual(pipeline.parse_page_spec("5,2,2-3"), [2, 3, 5])
+
+    def test_whitespace_and_chinese_commas_are_tolerated(self):
+        self.assertEqual(pipeline.parse_page_spec(" 2 ，5, 8 "), [2, 5, 8])
+
+    def test_empty_means_not_used(self):
+        self.assertEqual(pipeline.parse_page_spec(""), [])
+        self.assertEqual(pipeline.parse_page_spec("   "), [])
+        self.assertEqual(pipeline.parse_page_spec(None), [])
+
+    def test_single_page_range_is_valid(self):
+        self.assertEqual(pipeline.parse_page_spec("3-3"), [3])
+
+    def test_garbage_token_rejected(self):
+        with self.assertRaises(ValueError):
+            pipeline.parse_page_spec("2,abc")
+
+    def test_open_range_rejected(self):
+        with self.assertRaises(ValueError):
+            pipeline.parse_page_spec("2-")
+
+    def test_reversed_range_rejected(self):
+        with self.assertRaises(ValueError):
+            pipeline.parse_page_spec("5-2")
+
+    def test_zero_is_not_a_page_number(self):
+        with self.assertRaises(ValueError):
+            pipeline.parse_page_spec("0,2")
+
+    def test_empty_token_rejected(self):
+        with self.assertRaises(ValueError):
+            pipeline.parse_page_spec("2,,5")
+
+
 class HhmmssTests(unittest.TestCase):
     def test_zero(self):
         self.assertEqual(core.hhmmss(0), "00:00:00")
@@ -838,6 +882,174 @@ class AllPagesPipelineTests(unittest.TestCase):
                 core.fetch_video_meta(bvid="BV1", page=2)
         self.assertIn("分P", str(ctx.exception))
 
+
+class SpecifiedPagesPipelineTests(unittest.TestCase):
+    """pages="2,5,8"：指定分P优先于 all_pages 与 ?p=N，只抓所选分P。"""
+
+    def _run(self, fetch, pages="2", pages_meta=MULTI_PAGES, claimed=10,
+             target="BV1GJ411x7h7", **kw):
+        out = tempfile.mkdtemp(prefix="danmaku_pipe_")
+        logs = []
+        with patch("core.session.http_get_json",
+                   return_value=api_payload(claimed=claimed, pages=pages_meta)), \
+                patch("core.session.http_get_bytes", side_effect=fetch):
+            result = pipeline.run_pipeline(
+                target, out, sleep=0, cancel=lambda: False, pages=pages,
+                progress=lambda **kw: logs.append(kw), **kw)
+        return result, logs
+
+    def test_only_selected_parts_are_crawled_in_order(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        result, _ = self._run(fetch, pages="3,1")
+        self.assertEqual([p["page"] for p in result["parts"]], [1, 3],
+                         "指定分P升序抓取，没选的不碰")
+        self.assertEqual(list(dict.fromkeys(fetch.cids)), [101, 303])
+        self.assertEqual(result["rows"], 2)
+
+    def test_beats_all_pages_and_link_page(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        # 同时勾「全部分P」且链接带 ?p=1：指定分P仍然赢，且要说清楚谁生效
+        out = tempfile.mkdtemp(prefix="danmaku_pipe_")
+        logs = []
+        with patch("core.session.http_get_json",
+                   return_value=api_payload(claimed=10, pages=MULTI_PAGES)), \
+                patch("core.session.http_get_bytes", side_effect=fetch):
+            result = pipeline.run_pipeline(
+                "https://www.bilibili.com/video/BV1GJ411x7h7?p=1", out,
+                sleep=0, cancel=lambda: False, all_pages=True, pages="2",
+                progress=lambda **kw: logs.append(kw))
+        self.assertEqual(list(dict.fromkeys(fetch.cids)), [202])
+        self.assertEqual([p["page"] for p in result["parts"]], [2])
+        warns = [kw["text"] for kw in logs if kw.get("level") == "warn"]
+        self.assertTrue(any("指定分P" in t and "为准" in t for t in warns),
+                        warns)
+
+    def test_one_jsonl_per_selected_part(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              303: {1: make_segment(make_elem(3))}})
+        result, _ = self._run(fetch, pages="1,3")
+        self.assertEqual([Path(p).name for p in result["jsonl_files"]],
+                         ["danmaku_BV1GJ411x7h7_P1.jsonl",
+                          "danmaku_BV1GJ411x7h7_P3.jsonl"])
+        for path in result["jsonl_files"]:
+            self.assertTrue(Path(path).exists(), path)
+
+    def test_excel_summary_lists_only_selected_parts(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              303: {1: make_segment(make_elem(3))}})
+        result, _ = self._run(fetch, pages="1,3")
+        wb = load_workbook(result["xlsx"])
+        self.assertIn("分P汇总", wb.sheetnames)
+        body = [list(r) for r in wb["分P汇总"].iter_rows(min_row=4,
+                                                         values_only=True)
+                if r[1]]
+        self.assertEqual([r[1] for r in body],
+                         ["P1 第一局", "P3 第三局", "合计"],
+                         "汇总表只列所选分P，没选的不许出现")
+
+    def test_single_selected_part_stays_single_part_shaped(self):
+        fetch = PerPartFetch({202: {1: make_segment(make_elem(9))}})
+        result, _ = self._run(fetch, pages="2")
+        self.assertEqual(load_workbook(result["xlsx"]).sheetnames,
+                         ["概览", "弹幕分析", "弹幕明细", "密度分布"])
+        self.assertTrue(Path(result["jsonl"]).exists(),
+                        "只选一个分P时 jsonl 指向具体文件")
+
+    def test_out_of_range_pages_are_skipped_with_a_warn(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        result, logs = self._run(fetch, pages="2,9")
+        self.assertEqual([p["page"] for p in result["parts"]], [2],
+                         "超界分P跳过不失败，合法分P照抓")
+        warns = [kw["text"] for kw in logs if kw.get("level") == "warn"]
+        self.assertTrue(any("超出范围" in t and "跳过" in t for t in warns),
+                        warns)
+
+    def test_all_out_of_range_fails_like_no_danmaku_with_the_real_reason(self):
+        fetch = PerPartFetch({})
+        with self.assertRaises(core.DanmakuUnavailable) as ctx:
+            self._run(fetch, pages="8,9")
+        message = str(ctx.exception)
+        self.assertIn("超出范围", message)
+        self.assertNotIn("限流", message,
+                         "全部超界不是限流，报错文案不许往限流上引")
+        self.assertEqual(fetch.cids, [], "没有合法分P时不许发出任何分段请求")
+
+    def test_all_out_of_range_without_claimed_danmaku_is_an_empty_report(self):
+        fetch = PerPartFetch({})
+        result, logs = self._run(fetch, pages="8,9", claimed=0)
+        self.assertEqual(result["rows"], 0)
+        self.assertTrue(Path(result["xlsx"]).exists())
+        warns = [kw["text"] for kw in logs if kw.get("level") == "warn"]
+        self.assertTrue(any("超出范围" in t for t in warns))
+
+    def test_empty_pages_leaves_old_modes_untouched(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        result, _ = self._run(fetch, pages="", all_pages=True)
+        self.assertEqual([p["page"] for p in result["parts"]], [1, 2, 3],
+                         "指定分P留空时旧模式行为必须原样保留")
+
+    def test_budget_stops_between_selected_parts(self):
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        payload = api_payload(claimed=10, pages=MULTI_PAGES)
+
+        # 预算的真实计数点在 HTTP 层入口（core.client），离线测试把它 patch
+        # 掉了，所以按既有约定（DynamicsBudgetTests）在假通道里补记账。
+        def json_call(url, **kw):
+            if kw.get("budget") is not None:
+                kw["budget"].observe_request()
+            return payload
+
+        def bytes_call(url, **kw):
+            if kw.get("budget") is not None:
+                kw["budget"].observe_request()
+            return fetch(url, **kw)
+
+        # 预算 2 次请求：meta 用 1 次、P1 第 1 段用 1 次，P2 起不再发请求
+        out = tempfile.mkdtemp(prefix="danmaku_pipe_")
+        with patch("core.session.http_get_json", side_effect=json_call), \
+                patch("core.session.http_get_bytes", side_effect=bytes_call):
+            result = pipeline.run_pipeline(
+                "BV1GJ411x7h7", out, sleep=0, cancel=lambda: False,
+                pages="1,2,3", max_requests=2, max_segments=1)
+        self.assertEqual([p["page"] for p in result["parts"]], [1])
+        self.assertEqual(list(dict.fromkeys(fetch.cids)), [101],
+                         "到限后不许再碰下一个分P的接口")
+        self.assertEqual(result["stats"]["stopped_reason"], "budget_reached")
+
+    def test_cancel_between_selected_parts_stops_the_loop(self):
+        state = {"done": 0}
+
+        def cancel():
+            return state["done"] >= 1
+
+        def progress(**kw):
+            if "累计" in str(kw.get("text", "")):
+                state["done"] += 1
+
+        fetch = PerPartFetch({101: {1: make_segment(make_elem(1))},
+                              202: {1: make_segment(make_elem(2))},
+                              303: {1: make_segment(make_elem(3))}})
+        out = tempfile.mkdtemp(prefix="danmaku_pipe_")
+        with patch("core.session.http_get_json",
+                   return_value=api_payload(claimed=10, pages=MULTI_PAGES)), \
+                patch("core.session.http_get_bytes", side_effect=fetch):
+            result = pipeline.run_pipeline(
+                "BV1GJ411x7h7", out, sleep=0, cancel=cancel, pages="1,2,3",
+                progress=progress)
+        self.assertEqual(list(dict.fromkeys(fetch.cids)), [101],
+                         "取消后不许再碰下一个分P的接口")
+        self.assertTrue(result["stats"]["cancelled"])
+
     def test_fetch_video_meta_surfaces_api_errors(self):
         with patch("core.session.http_get_json",
                    return_value={"code": -404, "message": "啥都木有"}):
@@ -905,7 +1117,7 @@ class DanmakuPageTests(unittest.TestCase):
         def value(self):
             return self._v
 
-    def _page(self, target="BV1GJ411x7h7", all_pages=False):
+    def _page(self, target="BV1GJ411x7h7", all_pages=False, pages=""):
         page = DanmakuPage.__new__(DanmakuPage)
         page.target_edit = self._Edit(target)
         page.out_row = self._Row("D:\\out")
@@ -914,6 +1126,7 @@ class DanmakuPageTests(unittest.TestCase):
         # 预算输入：新增控件随 fake 清单同步（默认值与 core.budget 一致）
         page.max_requests_edit = self._Edit("20000")
         page.max_minutes_edit = self._Edit("240")
+        page.pages_edit = self._Edit(pages)
         page.all_pages = self._Check(all_pages)
         page.auto_open = self._Check(True)
         return page
@@ -946,6 +1159,32 @@ class DanmakuPageTests(unittest.TestCase):
             page.history_target_summary({"target": "BV1GJ411x7h7",
                                          "all_pages": True}),
             "BV1GJ411x7h7 全部分P")
+
+    def test_specified_pages_round_trip_through_history(self):
+        page = self._page(pages="2,5,8")
+        params = page.collect_params()
+        self.assertEqual(params["pages"], "2,5,8")
+        reusable = page.history_reusable_params(params)
+        fresh = self._page()
+        fresh.apply_reusable_params(reusable)
+        self.assertEqual(fresh.pages_edit.text(), "2,5,8",
+                         "历史记录里的指定分P要能填回来")
+
+    def test_history_summary_prefers_specified_pages(self):
+        page = self._page()
+        self.assertEqual(
+            page.history_target_summary({"target": "BV1GJ411x7h7",
+                                         "pages": "2,5,8"}),
+            "BV1GJ411x7h7 指定分P 2,5,8")
+        self.assertEqual(
+            page.history_target_summary({"target": "BV1GJ411x7h7",
+                                         "all_pages": True, "pages": "2"}),
+            "BV1GJ411x7h7 指定分P 2")
+
+    def test_bad_pages_text_rejected_before_the_task_starts(self):
+        """指定分P格式不对要点开始时就报错，不能等任务跑起来才失败。"""
+        with self.assertRaises(ValueError):
+            self._page(pages="2,abc").collect_params()
 
     def test_history_output_paths_covers_excel_and_jsonl(self):
         page = self._page()

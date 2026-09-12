@@ -12,7 +12,7 @@ from core.budget import (DEFAULT_MAX_MINUTES, DEFAULT_MAX_REQUESTS,
                          MAX_MINUTES_LIMIT, MAX_REQUESTS_LIMIT)
 
 from . import core
-from .pipeline import run_pipeline
+from .pipeline import parse_page_spec, run_pipeline
 
 SAMPLE_TARGET = "视频链接或 BV 号：BV1GJ411x7h7 · 多分P可写 ?p=2"
 
@@ -59,6 +59,10 @@ class DanmakuPage(TaskPage):
             f"任务最长运行多少分钟（1–{MAX_MINUTES_LIMIT:,}），到限安全停止")
         form.addRow("时长上限(分钟)", self.max_minutes_edit)
 
+        self.pages_edit = QLineEdit()
+        self.pages_edit.setPlaceholderText("如 2,5,8 或 2-4,7，优先于「全部分P」")
+        form.addRow("指定分P", self.pages_edit)
+
         self.all_pages = QCheckBox("抓取全部分P（多分P视频串行抓完，耗时更长）")
         form.addRow("", self.all_pages)
 
@@ -70,7 +74,8 @@ class DanmakuPage(TaskPage):
             "导出概览、弹幕分析（热词/高频弹幕/热点分钟，纯本机计算）、弹幕明细、"
             "按分钟的密度分布，并另出一份 Markdown 分析报告；\n"
             "多分P时另有分P汇总、并按分P重算密度。\n"
-            "不勾「全部分P」时：链接里加 ?p=2 指定要抓哪个分P。"))
+            "「指定分P」填 2,5,8 或 2-4,7 只抓所选分P，优先于「全部分P」；\n"
+            "留空且不勾「全部分P」时：链接里加 ?p=2 指定要抓哪个分P。"))
         self.target_edit.setFocus()
 
     @staticmethod
@@ -91,6 +96,9 @@ class DanmakuPage(TaskPage):
         if not target:
             raise ValueError("请先输入视频链接或 BV 号")
         core.parse_target(target)             # 提前报错，别等任务跑起来才失败
+        pages = self.pages_edit.text().strip()
+        if pages:
+            parse_page_spec(pages)            # 同上：格式不对在启动前就报错
         out_dir = self.out_row.value()
         if not out_dir:
             raise ValueError("请设置输出目录")
@@ -108,14 +116,14 @@ class DanmakuPage(TaskPage):
         max_minutes = self._parse_int(
             self.max_minutes_edit.text(), "时长上限",
             DEFAULT_MAX_MINUTES, 1, MAX_MINUTES_LIMIT)
-        return target, out_dir, max_segments, sleep, max_requests, max_minutes
+        return target, out_dir, max_segments, sleep, max_requests, max_minutes, pages
 
     def collect_params(self):
         (target, out_dir, max_segments, sleep,
-         max_requests, max_minutes) = self._read()
+         max_requests, max_minutes, pages) = self._read()
         return {"target": target, "out_dir": out_dir,
                 "max_segments": max_segments, "sleep": sleep,
-                "all_pages": self.all_pages.isChecked(),
+                "all_pages": self.all_pages.isChecked(), "pages": pages,
                 "open_result": self.auto_open.isChecked(),
                 "max_requests": max_requests, "max_minutes": max_minutes}
 
@@ -132,6 +140,7 @@ class DanmakuPage(TaskPage):
             str(params.get("max_requests", DEFAULT_MAX_REQUESTS)))
         self.max_minutes_edit.setText(
             str(params.get("max_minutes", DEFAULT_MAX_MINUTES)))
+        self.pages_edit.setText(str(params.get("pages") or ""))
         self.all_pages.setChecked(bool(params.get("all_pages", False)))
         self.auto_open.setChecked(bool(params.get("open_result", True)))
         self.target_edit.setFocus()
@@ -147,7 +156,13 @@ class DanmakuPage(TaskPage):
             bvid, aid, page = core.parse_target(params.get("target", ""))
         except ValueError:
             return "弹幕抓取（未识别目标）"
-        scope = "全部分P" if params.get("all_pages") else f"P{page}"
+        pages = str(params.get("pages") or "").strip()
+        if pages:
+            scope = f"指定分P {pages}"    # 优先级最高的模式，摘要以它为准
+        elif params.get("all_pages"):
+            scope = "全部分P"
+        else:
+            scope = f"P{page}"
         return f"{bvid or f'av{aid}'} {scope}"
 
     def history_reusable_params(self, params):
@@ -157,6 +172,7 @@ class DanmakuPage(TaskPage):
             "max_segments": params.get("max_segments", core.DEFAULT_MAX_SEGMENTS),
             "sleep": params.get("sleep", core.DEFAULT_SLEEP),
             "all_pages": bool(params.get("all_pages", False)),
+            "pages": str(params.get("pages") or ""),
             "open_result": bool(params.get("open_result", True)),
             "max_requests": params.get("max_requests", DEFAULT_MAX_REQUESTS),
             "max_minutes": params.get("max_minutes", DEFAULT_MAX_MINUTES),
