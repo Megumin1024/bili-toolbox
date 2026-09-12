@@ -64,24 +64,6 @@ class _SpinField:
         self._value = int(value)
 
 
-class _ComboField:
-    def __init__(self, value="auto"):
-        self.values = ["auto", "h2-ja3", "urllib"]
-        self.current = value
-
-    def currentData(self):
-        return self.current
-
-    def findData(self, value):
-        try:
-            return self.values.index(value)
-        except ValueError:
-            return -1
-
-    def setCurrentIndex(self, index):
-        self.current = self.values[index]
-
-
 class _PathField:
     def __init__(self, value=""):
         self._value = str(value)
@@ -274,13 +256,14 @@ class TaskPresetPageTests(unittest.TestCase):
         page = MonitorPage.__new__(MonitorPage)
         page.bvid_edit = _TextField("")
         page.interval_spin = _SpinField(60)
-        page.transport_combo = _ComboField("auto")
         page.data_row = _PathField("")
         params = page.collect_preset_params()
+        # transport 下拉已移除：新参数不再携带 transport 键
         self.assertEqual(params, {
-            "bvid": "", "interval": 60, "transport": "auto", "data_dir": "",
+            "bvid": "", "interval": 60, "data_dir": "",
         })
         with patch.object(MonitorPage, "on_start") as start:
+            # 旧参数携带的 transport 键必须被容忍并忽略
             page.apply_preset_params({
                 "bvid": "BV1Monitor", "interval": 120,
                 "transport": "urllib", "data_dir": r"D:\monitor",
@@ -288,7 +271,6 @@ class TaskPresetPageTests(unittest.TestCase):
         start.assert_not_called()
         self.assertEqual(page.bvid_edit.value, "BV1Monitor")
         self.assertEqual(page.interval_spin.value(), 120)
-        self.assertEqual(page.transport_combo.current, "urllib")
         self.assertEqual(page.data_row.value(), r"D:\monitor")
 
     def test_apply_preset_hooks_do_not_call_task_page_start(self):

@@ -7,7 +7,8 @@ from pathlib import Path
 
 import qtawesome as qta
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
+from PySide6.QtWidgets import (QAbstractSpinBox, QCheckBox, QComboBox,
+                               QDoubleSpinBox,
                                QFormLayout, QFrame, QGridLayout, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QListWidgetItem,
                                QMessageBox,
@@ -84,19 +85,15 @@ class MonitorPage(QWidget):
         self.interval_spin.setValue(60)
         self.interval_spin.setSuffix(" 秒")
         form.addRow("采集间隔", self.interval_spin)
-        self.transport_combo = QComboBox()
-        for val, label in (("auto", "自动切换（推荐）"),
-                           ("h2-ja3", "TLS 指纹通道"),
-                           ("urllib", "标准通道回退")):
-            self.transport_combo.addItem(label, val)
-        form.addRow("传输通道", self.transport_combo)
+        # 网络通道以设置页 configure 的统一会话为准（监控已并入 session 单例），
+        # 页面不再提供「传输通道」下拉。
         default_data = str(Path(self.cfg.get("out_dir") or app_base_dir()) / "监控数据")
         self.data_row = PathRow(None, default_data)
         form.addRow("数据目录", self.data_row)
         play.addLayout(form)
         root.addWidget(params)
 
-        alert_card, alert_layout = card(variant="accent")
+        alert_card, alert_layout = card(margin=12, variant="accent")
         self.alert_card = alert_card
         alert_head = QHBoxLayout()
         alert_head.addWidget(h2("监控提醒"))
@@ -153,7 +150,7 @@ class MonitorPage(QWidget):
             "不进入任务历史与预设。"))
 
         rule_grid = QGridLayout()
-        rule_grid.setHorizontalSpacing(10)
+        rule_grid.setHorizontalSpacing(6)
         rule_grid.setVerticalSpacing(8)
         rule_grid.setColumnStretch(1, 1)
 
@@ -219,6 +216,27 @@ class MonitorPage(QWidget):
         rule_grid.addWidget(self.alert_disconnect_check, 4, 0)
         rule_grid.addWidget(QLabel("连续失败次数"), 4, 1)
         rule_grid.addWidget(self.alert_disconnect_failures_spin, 4, 2)
+        # 960×640 裁切根因（实测，MainWindow 内视口仅 734px）：QSpinBox 的
+        # sizeHint 按取值上限位数预留宽度（增长/绝对增长上限 2^31-1 共 10 位），
+        # 叠加「分钟冷却」等后缀，把 rule_grid 最小宽度推到 907px → 右缘裁切。
+        # 修复（字宽按 150% DPI 环境实测：汉字≈20px、chrome=padding20+border2）：
+        # spin 去掉上下微调按钮（NoButtons，键盘/滚轮/方向键调整不受影响）——
+        # 带按钮时按钮占 32px，「10 分钟冷却」(110)、「10000 播放」(106) 等
+        # 常用值加 chrome 后两个 spin 列需 324px，960 视口网格可用 658px 放不下；
+        # 去按钮后按「最长常用值 + 后缀完整显示」设显式下限即可全部完整
+        # （列合计 631px ≤ 658px），极端上限值（2147483647、10080 分钟冷却）
+        # 的后缀尾部仍会截断，属可接受取舍。1440×900 不劣化。
+        # 另配合：网格列距 10→6、告警卡边距 14→12。
+        for spin, min_w in (
+                (self.alert_stagnation_window_spin, 130),
+                (self.alert_stagnation_growth_spin, 130),
+                (self.alert_spike_window_spin, 130),
+                (self.alert_spike_absolute_spin, 130),
+                (self.alert_spike_relative_spin, 125),
+                (self.alert_spike_cooldown_spin, 134),
+                (self.alert_disconnect_failures_spin, 90)):
+            spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+            spin.setMinimumWidth(min_w)
         alert_layout.addLayout(rule_grid)
 
         alert_action_row = QHBoxLayout()
@@ -271,6 +289,11 @@ class MonitorPage(QWidget):
         self.btn_browser.setObjectName("flat")
         self.btn_browser.clicked.connect(self.on_open_browser)
         self.status_label = StatusPill("○ 未启动", "idle")
+        # 960 视口（734px）下运行态 pill 的完整 URL 文本（最小宽 340px）会把
+        # action bar 最小宽度顶到 734px，成为告警卡右缘裁切的第二个驱动源：
+        # 给 pill 设 200px 显式下限压住该行（小窗时 URL 截断显示、完整地址挂
+        # tooltip；1440×900 下 pill 仍按 sizeHint 完整展开，不劣化）。
+        self.status_label.setMinimumWidth(200)
         btn_row.addWidget(self.btn_start)
         btn_row.addWidget(self.btn_stop)
         btn_row.addWidget(self.btn_browser)
@@ -579,7 +602,6 @@ class MonitorPage(QWidget):
         params = {
             "bvid": self.bvid_edit.text().strip(),
             "interval": self.interval_spin.value(),
-            "transport": self.transport_combo.currentData(),
             "data_dir": self.data_row.value(),
         }
         if hasattr(self, "alert_total_check"):
@@ -592,9 +614,7 @@ class MonitorPage(QWidget):
             self.interval_spin.setValue(int(params.get("interval", 60)))
         except (TypeError, ValueError):
             self.interval_spin.setValue(60)
-        transport = params.get("transport", "auto")
-        index = self.transport_combo.findData(transport)
-        self.transport_combo.setCurrentIndex(max(0, index))
+        # 旧预设/历史可能携带已失效的 transport 键：不读取即容忍忽略。
         self.data_row.set_value(params.get("data_dir", ""))
         if hasattr(self, "alert_total_check"):
             self._apply_alert_mapping(params.get("alerts") or {})
@@ -626,6 +646,8 @@ class MonitorPage(QWidget):
             session_id=session_id)
         url = self.server.start()
         self.status_label.set_state("running", f"● 运行中 · {url}")
+        # 小窗下 pill 文本可能被截断，完整仪表盘地址挂在 tooltip。
+        self.status_label.setToolTip(url)
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
         webbrowser.open(url)
@@ -644,6 +666,7 @@ class MonitorPage(QWidget):
         # webhook_adapter 不随会话关闭：它没有需要释放的 Qt/网络资源，
         # 保留实例可让每小时 10 条的频控预算不被重启监控绕过。
         self.status_label.set_state("idle", "○ 未启动")
+        self.status_label.setToolTip("")
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
 

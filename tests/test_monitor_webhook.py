@@ -138,21 +138,6 @@ class _Double(_Spin):
         self.value_ = float(value)
 
 
-class _Combo:
-    def __init__(self, value="auto"):
-        self.current = value
-        self.values = ["auto", "h2-ja3", "urllib"]
-
-    def currentData(self):
-        return self.current
-
-    def findData(self, value):
-        return self.values.index(value) if value in self.values else -1
-
-    def setCurrentIndex(self, index):
-        self.current = self.values[index]
-
-
 class _Path:
     def __init__(self, value=""):
         self._value = str(value)
@@ -512,7 +497,6 @@ class PersistenceBoundaryTests(QtEnvironmentTestCase):
         page = MonitorPage.__new__(MonitorPage)
         page.bvid_edit = _Text("BV1")
         page.interval_spin = _Spin(60)
-        page.transport_combo = _Combo("auto")
         page.data_row = _Path("")
         page.alert_total_check = _Check(True)
         page.alert_windows_check = _Check(False)
@@ -559,6 +543,22 @@ class PersistenceBoundaryTests(QtEnvironmentTestCase):
         page.apply_preset_params(old_params)
         self.assertFalse(page.alert_webhook_check.isChecked())
         self.assertEqual(page.bvid_edit.text(), "BV1old")
+        page.on_app_close()
+
+    def test_apply_legacy_params_with_transport_key_is_tolerated(self):
+        """transport 下拉已移除：旧预设/历史携带的 transport 键被容忍并忽略。
+
+        不得报错，也不得误填其它控件（bvid/interval 照常生效）。
+        """
+        page = MonitorPage({"out_dir": ""})
+        page.apply_preset_params({
+            "bvid": "BV1legacy",
+            "interval": 45,
+            "transport": "h2-ja3",
+            "data_dir": "",
+        })
+        self.assertEqual(page.bvid_edit.text(), "BV1legacy")
+        self.assertEqual(page.interval_spin.value(), 45)
         page.on_app_close()
 
     def test_apply_new_preset_restores_webhook_switch(self):

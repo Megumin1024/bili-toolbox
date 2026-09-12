@@ -433,7 +433,6 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         page = MonitorPage.__new__(MonitorPage)
         page.bvid_edit = _Text("BV1")
         page.interval_spin = _Spin(60)
-        page.transport_combo = _Combo("auto")
         page.data_row = _Path("")
         page.alert_total_check = _Check(True)
         page.alert_windows_check = _Check(False)
@@ -456,6 +455,8 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         self.assertEqual(params["alerts"]["milestones"], "100,500")
         self.assertFalse(params["alerts"]["windows_enabled"])
         self.assertTrue(params["alerts"]["webhook_enabled"])
+        # transport 下拉已移除：新预设/历史参数不再携带该键
+        self.assertNotIn("transport", params)
         # 隐私边界：URL 绝不随预设/历史参数落盘，白名单里根本没有这个键
         self.assertNotIn("webhook_url", params)
         self.assertNotIn("webhook_url", params["alerts"])
@@ -592,21 +593,6 @@ class _Double(_Spin):
 
     def setValue(self, value):
         self.value_ = float(value)
-
-
-class _Combo:
-    def __init__(self, value="auto"):
-        self.current = value
-        self.values = ["auto", "h2-ja3", "urllib"]
-
-    def currentData(self):
-        return self.current
-
-    def findData(self, value):
-        return self.values.index(value) if value in self.values else -1
-
-    def setCurrentIndex(self, index):
-        self.current = self.values[index]
 
 
 if __name__ == "__main__":
