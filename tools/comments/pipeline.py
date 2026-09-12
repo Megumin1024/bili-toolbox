@@ -46,12 +46,12 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
 
     if kind == "dynamic":
         try:
-            meta = links.get_dynamic_meta(oid)
+            meta = links.get_dynamic_meta(oid, cancel=cancel)
         except RiskChallengeError as e:
             p(level="warn", text=f"触发B站风控挑战(-352)：{e.v_voucher[:28]}…")
             if not risk.risk_recovery_flow(e.v_voucher, progress=p):
                 raise
-            meta = links.get_dynamic_meta(oid)
+            meta = links.get_dynamic_meta(oid, cancel=cancel)
         except Exception as e:  # noqa: BLE001 - 元信息失败不阻塞抓取
             p(level="warn", text=f"动态元信息获取失败({e})，使用基础信息")
             meta = {"title": f"动态{oid}", "author": "", "pub_ts": None,

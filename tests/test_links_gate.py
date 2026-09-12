@@ -225,6 +225,26 @@ class ParseLinkForwardTests(unittest.TestCase):
         self.assertEqual(oid, 1234567890)
         m.assert_called_once_with("https://b23.tv/abc", cancel=ANY)
 
+    def test_meta_fetchers_forward_cancel_to_session(self):
+        """bvid_to_aid / get_dynamic_meta 把 cancel 透传给统一会话。"""
+        seen = {}
+
+        def fake_json(url, **kwargs):
+            seen["cancel"] = kwargs.get("cancel")
+            if "view" in url:
+                return {"code": 0, "data": {"aid": 1, "bvid": "BV1X",
+                                            "title": "t", "owner": {"name": "u"},
+                                            "pubdate": None,
+                                            "stat": {"reply": 0}}}
+            return {"code": 0, "data": {"item": {"modules": {}}}}
+
+        cancel = lambda: False  # noqa: E731
+        with patch.object(links.session, "http_get_json", side_effect=fake_json):
+            links.bvid_to_aid("BV1X", cancel=cancel)
+            self.assertIs(seen["cancel"], cancel)
+            links.get_dynamic_meta(42, cancel=cancel)
+            self.assertIs(seen["cancel"], cancel)
+
 
 class ExpandCancelTests(unittest.TestCase):
     """expand 链路：页间等待可取消、页数上限不变、cancel/budget 透传。"""

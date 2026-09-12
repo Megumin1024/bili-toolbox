@@ -10,8 +10,8 @@ import time
 from pathlib import Path
 
 from core import links, risk, session
-from core.budget import TaskBudget
-from core.cancel import wait as cancel_wait
+from core.budget import BudgetExhaustedError, TaskBudget
+from core.cancel import TaskCancelledError, wait as cancel_wait
 from core.risk import RiskChallengeError
 
 from . import core
@@ -74,12 +74,19 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
 
     p(text="展开采集来源…")
     bvids, notes = [], {}
-    for line in sources:
-        for bv, note in links.expand_source(line, progress=p,
-                                            cancel=cancel, budget=budget):
-            if bv not in notes:
-                bvids.append(bv)
-                notes[bv] = note
+    try:
+        for line in sources:
+            for bv, note in links.expand_source(line, progress=p,
+                                                cancel=cancel, budget=budget):
+                if bv not in notes:
+                    bvids.append(bv)
+                    notes[bv] = note
+    except BudgetExhaustedError:
+        # 展开期预算到限：保留已展开部分，轮末的预算检查按 budget_reached 收尾
+        p(level="warn", text=f"已达预算上限（{budget.reason()}），来源展开提前结束")
+    except TaskCancelledError:
+        # 展开期取消：已展开部分保留，随后的取消检查负责收尾
+        pass
     if not bvids:
         raise ValueError("没有解析到任何视频，请检查输入")
     p(text=f"来源展开完成: 共 {len(bvids)} 个视频（去重后）")

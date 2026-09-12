@@ -47,7 +47,7 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
             max_requests=max_requests,
             max_seconds=(max_minutes * 60) if max_minutes is not None else None)
 
-    bvid, aid, page = core.parse_target(target)
+    bvid, aid, page = core.parse_target(target, cancel=cancel)
     try:
         meta = core.fetch_video_meta(bvid=bvid, aid=aid, page=page,
                                      cancel=cancel, budget=budget)

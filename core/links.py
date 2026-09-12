@@ -90,7 +90,7 @@ def parse_link(text, cancel=None):
     m = BV_RE.search(text)
     if m:
         bvid = m.group(0)
-        aid, info = bvid_to_aid(bvid)
+        aid, info = bvid_to_aid(bvid, cancel=cancel)
         info["source"] = text
         return "video", aid, info
     m = AV_RE.search(text)
@@ -101,10 +101,13 @@ def parse_link(text, cancel=None):
     raise ValueError(f"无法识别的链接或ID: {text[:80]}")
 
 
-def bvid_to_aid(bvid):
-    """BV 号 → (aid, 视频元信息)（web view 接口，游客可用）。"""
+def bvid_to_aid(bvid, cancel=None):
+    """BV 号 → (aid, 视频元信息)（web view 接口，游客可用）。
+
+    cancel 透传统一会话：闸门冷却/退避等待可被取消打断。
+    """
     url = f"https://api.bilibili.com/x/web-interface/view?bvid={bvid}"
-    data = session.http_get_json(url)
+    data = session.http_get_json(url, cancel=cancel)
     if data.get("code") != 0:
         raise ValueError(f"视频信息获取失败: code={data.get('code')} {data.get('message')}")
     d = data["data"]
@@ -115,10 +118,10 @@ def bvid_to_aid(bvid):
     return int(d["aid"]), info
 
 
-def get_dynamic_meta(dyn_id):
-    """动态详情（游客可用）：标题/作者/发布时间/声称评论数。"""
+def get_dynamic_meta(dyn_id, cancel=None):
+    """动态详情（游客可用）：标题/作者/发布时间/声称评论数。cancel 透传统一会话。"""
     url = f"https://api.bilibili.com/x/polymer/web-dynamic/v1/detail?id={dyn_id}"
-    data = session.http_get_json(url)
+    data = session.http_get_json(url, cancel=cancel)
     if data.get("code") != 0:
         raise ValueError(f"动态信息获取失败: code={data.get('code')} {data.get('message')}")
     item = (data.get("data") or {}).get("item") or {}

@@ -3,7 +3,7 @@
 本项目的所有重要变更记录在此文件中。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [1.0.5] - 2026-09-12
 
 ### 新增
 
@@ -99,7 +99,8 @@
 
 - 单一 PyInstaller 配置（onedir，约 45MB）
 
-[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.4...HEAD
+[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.5...HEAD
+[1.0.5]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.1...v1.0.2

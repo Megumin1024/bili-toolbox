@@ -624,6 +624,61 @@ class CollectorBudgetTests(unittest.TestCase):
 
             self.assertIsNone(result.get("stopped_reason"))
 
+    def test_expand_phase_budget_stop_is_graceful(self):
+        """展开期预算到限：不再逃逸为 failed，按 budget_reached 正常收尾。"""
+        with tempfile.TemporaryDirectory(prefix="budget_col_expand_") as tmp:
+            calls = {"n": 0}
+
+            def expand(line, progress=None, **kwargs):
+                calls["n"] += 1
+                if calls["n"] > 1:
+                    raise BudgetExhaustedError("任务预算到限")
+                return [("BV1", ""), ("BV2", "")]
+
+            with patch.object(collector_pipeline.session, "ensure_ready"), \
+                    patch.object(collector_pipeline.links, "expand_source",
+                                 side_effect=expand), \
+                    patch.object(collector_pipeline.core, "collect_snapshot",
+                                 side_effect=self._collect_with_disk()), \
+                    patch.object(collector_pipeline.core, "export_xlsx"):
+                result = collector_pipeline.run_pipeline(
+                    ["BV1", "BV1"], tmp, sleep=0, progress=lambda **kw: None,
+                    monitor=False, rounds=1, max_requests=1)
+
+            self.assertEqual(calls["n"], 2, "第二行来源展开时到限")
+            self.assertEqual(result.get("stopped_reason"), "budget_reached")
+            self.assertEqual(result["videos"], 2, "首行已展开的视频必须保留")
+
+    def test_expand_phase_cancel_is_graceful(self):
+        """展开期取消：不再逃逸为 failed；已展开部分保留、不冒充预算停止。"""
+        with tempfile.TemporaryDirectory(prefix="budget_col_expand_c_") as tmp:
+            calls = {"n": 0}
+
+            def expand(line, progress=None, **kwargs):
+                calls["n"] += 1
+                if calls["n"] > 1:
+                    raise TaskCancelledError()
+                return [("BV1", "")]
+
+            def collect(values, progress, snapshot_path, **kwargs):
+                Path(snapshot_path).touch()   # 真实 collect_snapshot 会落盘建文件
+                return [], []
+
+            with patch.object(collector_pipeline.session, "ensure_ready"), \
+                    patch.object(collector_pipeline.links, "expand_source",
+                                 side_effect=expand), \
+                    patch.object(collector_pipeline.core, "collect_snapshot",
+                                 side_effect=collect), \
+                    patch.object(collector_pipeline.core, "export_xlsx"):
+                result = collector_pipeline.run_pipeline(
+                    ["BV1", "BV1"], tmp, sleep=0, progress=lambda **kw: None,
+                    monitor=False, rounds=1, cancel=lambda: True)
+
+            self.assertEqual(calls["n"], 2)
+            self.assertIsNone(result.get("stopped_reason"),
+                              "取消不得冒充预算停止")
+            self.assertEqual(result["rounds"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

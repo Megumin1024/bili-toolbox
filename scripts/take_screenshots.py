@@ -105,14 +105,23 @@ SHOTS = [
     ("light", 2, (960, 640), "monitor-compact.png", "idle"),
     ("light", 1, (960, 640), "collector-compact.png", "idle"),
     ("dark", 1, (960, 640), "collector-compact-dark.png", "idle"),
-    ("light", 5, (1440, 900), "settings.png", "idle"),
-    ("dark", 5, (1440, 900), "settings-dark.png", "idle"),
-    ("light", 5, (960, 640), "settings-compact.png", "idle"),
-    ("dark", 5, (960, 640), "settings-compact-dark.png", "idle"),
-    ("light", 5, (1440, 900), "settings-history.png", "history"),
-    ("dark", 5, (1440, 900), "settings-history-dark.png", "history"),
-    ("dark", 5, (960, 640), "settings-history-compact-dark.png", "history"),
-    ("dark", 5, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
+    # 用户动态 / 弹幕（v1.0.4 新增的第 6/7 个工具，此前从未被截图覆盖）
+    ("light", 5, (1440, 900), "user-dynamics.png", "idle"),
+    ("dark", 5, (1440, 900), "user-dynamics-dark.png", "idle"),
+    ("light", 5, (960, 640), "user-dynamics-compact.png", "idle"),
+    ("light", 6, (1440, 900), "danmaku.png", "idle"),
+    ("dark", 6, (1440, 900), "danmaku-dark.png", "idle"),
+    ("light", 6, (960, 640), "danmaku-compact.png", "idle"),
+    ("dark", 6, (960, 640), "danmaku-compact-dark.png", "idle"),
+    # 设置页在 7 个工具之后，索引 7（此前误写 5，实拍到用户动态页）
+    ("light", 7, (1440, 900), "settings.png", "idle"),
+    ("dark", 7, (1440, 900), "settings-dark.png", "idle"),
+    ("light", 7, (960, 640), "settings-compact.png", "idle"),
+    ("dark", 7, (960, 640), "settings-compact-dark.png", "idle"),
+    ("light", 7, (1440, 900), "settings-history.png", "history"),
+    ("dark", 7, (1440, 900), "settings-history-dark.png", "history"),
+    ("dark", 7, (960, 640), "settings-history-compact-dark.png", "history"),
+    ("dark", 7, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
     ("light", 0, (960, 640), "comments-compact.png", "idle"),
     ("dark", 2, (960, 640), "monitor-compact-dark.png", "running"),
 ]
@@ -349,11 +358,11 @@ def shoot(index=0):
     win.switch(page_index)
     prepare_demo(page_index, state)
     win.show()
-    if size == (960, 640) and page_index in (1, 2, 3, 4, 5):
-        current_page = settings if page_index == 5 else win.pages[page_index]
+    if size == (960, 640) and page_index in (1, 2, 3, 4, 5, 6, 7):
+        current_page = settings if page_index == 7 else win.pages[page_index]
         page_scroll = current_page.findChild(QScrollArea, "pageScroll")
         if page_scroll is not None:
-            if page_index == 5:
+            if page_index == 7:
                 target = settings.history_card if state == "history" else settings.diagnostics_card
             elif page_index == 4:
                 target = current_page.tabs
@@ -361,6 +370,8 @@ def shoot(index=0):
                 target = current_page.dashboard_open_button
             elif page_index == 2:
                 target = current_page.alert_card
+            elif page_index in (5, 6):
+                target = current_page.params_card
             else:
                 target = (current_page.repair_card
                           if state in ("repair-options", "repair-result")
@@ -369,7 +380,7 @@ def shoot(index=0):
             page_scroll.ensureWidgetVisible(target, 0, 8)
 
     def save():
-        if state == "history-detail" and page_index == 5:
+        if state == "history-detail" and page_index == 7:
             dialog = win.settings_page._build_task_history_dialog()
             dialog.show()
             app.processEvents()

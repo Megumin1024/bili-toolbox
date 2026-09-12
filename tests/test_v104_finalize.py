@@ -269,8 +269,9 @@ class DocumentationConsistencyTests(unittest.TestCase):
         self.assertIn("**弹幕抓取/分析**", readme)
         self.assertIn("%USERPROFILE%\\BiliToolbox\\导出", changelog)
         self.assertNotIn("我的文档\\BiliToolbox\\导出", changelog)
+        # [1.0.4] 链接是历史记录，永久保留；版本断言跟随当前发布版本
         self.assertIn("[1.0.4]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...v1.0.4", changelog)
-        self.assertEqual(core.__version__, "1.0.4")
+        self.assertEqual(core.__version__, "1.0.5")
         for phrase in ("热词", "高频弹幕", "热点分钟", "密度分布"):
             self.assertIn(phrase, registry)
             self.assertIn(phrase, page)
