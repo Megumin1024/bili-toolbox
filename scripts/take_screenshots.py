@@ -113,15 +113,20 @@ SHOTS = [
     ("dark", 6, (1440, 900), "danmaku-dark.png", "idle"),
     ("light", 6, (960, 640), "danmaku-compact.png", "idle"),
     ("dark", 6, (960, 640), "danmaku-compact-dark.png", "idle"),
-    # 设置页在 7 个工具之后，索引 7（此前误写 5，实拍到用户动态页）
-    ("light", 7, (1440, 900), "settings.png", "idle"),
-    ("dark", 7, (1440, 900), "settings-dark.png", "idle"),
-    ("light", 7, (960, 640), "settings-compact.png", "idle"),
-    ("dark", 7, (960, 640), "settings-compact-dark.png", "idle"),
-    ("light", 7, (1440, 900), "settings-history.png", "history"),
-    ("dark", 7, (1440, 900), "settings-history-dark.png", "history"),
-    ("dark", 7, (960, 640), "settings-history-compact-dark.png", "history"),
-    ("dark", 7, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
+    # 关系分析（第 8 个工具，零网络本地分析）
+    ("light", 7, (1440, 900), "relation-analysis.png", "idle"),
+    ("dark", 7, (1440, 900), "relation-analysis-dark.png", "idle"),
+    ("light", 7, (960, 640), "relation-analysis-compact.png", "idle"),
+    ("dark", 7, (960, 640), "relation-analysis-compact-dark.png", "idle"),
+    # 设置页在 8 个工具之后，索引 8（此前 7 个工具时为索引 7）
+    ("light", 8, (1440, 900), "settings.png", "idle"),
+    ("dark", 8, (1440, 900), "settings-dark.png", "idle"),
+    ("light", 8, (960, 640), "settings-compact.png", "idle"),
+    ("dark", 8, (960, 640), "settings-compact-dark.png", "idle"),
+    ("light", 8, (1440, 900), "settings-history.png", "history"),
+    ("dark", 8, (1440, 900), "settings-history-dark.png", "history"),
+    ("dark", 8, (960, 640), "settings-history-compact-dark.png", "history"),
+    ("dark", 8, (1440, 900), "settings-history-detail-dark.png", "history-detail"),
     ("light", 0, (960, 640), "comments-compact.png", "idle"),
     ("dark", 2, (960, 640), "monitor-compact-dark.png", "running"),
 ]
@@ -259,6 +264,13 @@ def prepare_demo(page_index, state):
             page.refresh_sources()
             _report_demo_ready = True
 
+    elif page_index == 7:
+        # 关系分析页：填入中性演示路径，验证布局与来源声明可见
+        page.out_row.set_value(r"D:\BiliToolbox\关系分析")
+        page.fans1_row.set_value(r"D:\BiliToolbox\导出\粉丝清单_2026-01-01.csv")
+        page.follows1_row.set_value(r"D:\BiliToolbox\导出\关注清单_2026-01-01.csv")
+        page.fans2_row.set_value(r"D:\BiliToolbox\导出\粉丝清单_2026-09-01.csv")
+
     elif page_index == 2:
         running = state == "running"
         page.alert_total_check.setChecked(running)
@@ -358,11 +370,11 @@ def shoot(index=0):
     win.switch(page_index)
     prepare_demo(page_index, state)
     win.show()
-    if size == (960, 640) and page_index in (1, 2, 3, 4, 5, 6, 7):
-        current_page = settings if page_index == 7 else win.pages[page_index]
+    if size == (960, 640) and page_index in (1, 2, 3, 4, 5, 6, 7, 8):
+        current_page = settings if page_index == 8 else win.pages[page_index]
         page_scroll = current_page.findChild(QScrollArea, "pageScroll")
         if page_scroll is not None:
-            if page_index == 7:
+            if page_index == 8:
                 target = settings.history_card if state == "history" else settings.diagnostics_card
             elif page_index == 4:
                 target = current_page.tabs
@@ -370,7 +382,7 @@ def shoot(index=0):
                 target = current_page.dashboard_open_button
             elif page_index == 2:
                 target = current_page.alert_card
-            elif page_index in (5, 6):
+            elif page_index in (5, 6, 7):
                 target = current_page.params_card
             else:
                 target = (current_page.repair_card
@@ -380,7 +392,7 @@ def shoot(index=0):
             page_scroll.ensureWidgetVisible(target, 0, 8)
 
     def save():
-        if state == "history-detail" and page_index == 7:
+        if state == "history-detail" and page_index == 8:
             dialog = win.settings_page._build_task_history_dialog()
             dialog.show()
             app.processEvents()

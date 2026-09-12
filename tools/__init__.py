@@ -7,6 +7,7 @@ from .comments.page import CommentsPage
 from .danmaku.page import DanmakuPage
 from .data_check.page import DataCheckPage
 from .monitor.page import MonitorPage
+from .relation_analysis.page import RelationAnalysisPage
 from .report_center.page import ReportCenterPage
 from .user_dynamics.page import UserDynamicsPage
 
@@ -32,4 +33,7 @@ TOOLS = [
     ToolSpec(id="danmaku", name="弹幕抓取",
               subtitle="输入视频链接 · 抓取弹幕 → 热词/高频弹幕/热点分钟 + 密度分布 Excel（无需登录）",
               icon="fa5s.comment-dots", factory=DanmakuPage),
+    ToolSpec(id="relation_analysis", name="关系分析",
+             subtitle="本地粉丝/关注清单分析 → 互关/快照差异 → Excel（零网络）",
+             icon="fa5s.users", factory=RelationAnalysisPage),
 ]
