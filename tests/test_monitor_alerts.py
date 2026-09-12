@@ -2,6 +2,7 @@
 """监控提醒规则、事件隔离、通道降级和页面 Signal 回归测试。"""
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 from unittest.mock import Mock, patch
@@ -236,6 +237,8 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         page.notification_adapter = adapter
         page.alert_windows_check = _Check(True)
         page.alert_sound_check = _Check(True)
+        # Webhook 渠道是后加的：__new__ 页面补齐控件，保持关闭即不触碰通道
+        page.alert_webhook_check = _Check(False)
         page._log = logs.append
         page.on_test_alert()
         self.assertEqual(adapter.sound_count, 1)
@@ -255,6 +258,7 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         page.notification_adapter = FailingAdapter()
         page.alert_windows_check = _Check(True)
         page.alert_sound_check = _Check(True)
+        page.alert_webhook_check = _Check(False)
         page._log = logs.append
         with patch("tools.monitor.page.QMessageBox.information"):
             page.on_test_alert()
@@ -279,6 +283,7 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         page = MonitorPage.__new__(MonitorPage)
         page.alert_windows_check = _Check(False)
         page.alert_sound_check = _Check(False)
+        page.alert_webhook_check = _Check(False)
         page.notification_adapter = adapter
         page._log = Mock()
         with patch("tools.monitor.page.QMessageBox.information") as info:
@@ -433,6 +438,8 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         page.alert_total_check = _Check(True)
         page.alert_windows_check = _Check(False)
         page.alert_sound_check = _Check(True)
+        page.alert_webhook_check = _Check(True)
+        page.webhook_url_edit = _Text("https://example.com/hook/secret")
         page.alert_milestone_check = _Check(True)
         page.alert_milestone_edit = _Text(" 500,100,500 ")
         page.alert_stagnation_check = _Check(False)
@@ -448,6 +455,11 @@ class ChannelAndBoundaryTests(unittest.TestCase):
         params = page.collect_preset_params()
         self.assertEqual(params["alerts"]["milestones"], "100,500")
         self.assertFalse(params["alerts"]["windows_enabled"])
+        self.assertTrue(params["alerts"]["webhook_enabled"])
+        # 隐私边界：URL 绝不随预设/历史参数落盘，白名单里根本没有这个键
+        self.assertNotIn("webhook_url", params)
+        self.assertNotIn("webhook_url", params["alerts"])
+        self.assertNotIn("example.com", json.dumps(params, ensure_ascii=False))
 
 
 class PageSignalThreadTests(unittest.TestCase):

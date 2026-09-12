@@ -10,7 +10,8 @@ from collections import deque
 from dataclasses import dataclass
 import math
 import re
-from typing import Any, Mapping
+import time
+from typing import Any, Callable, Mapping
 
 
 DEFAULT_MILESTONES = (10000, 50000, 100000, 500000, 1000000)
@@ -23,6 +24,8 @@ MAX_RECENT_SAMPLES = (
     math.ceil(MAX_WINDOW_MINUTES * 60 / MIN_SAMPLE_INTERVAL_SECONDS)
     + WINDOW_BOUNDARY_MARGIN_SAMPLES
 )
+WEBHOOK_RATE_LIMIT = 10
+WEBHOOK_RATE_WINDOW_SECONDS = 3600.0
 
 
 def _as_bool(value: Any, default: bool) -> bool:
@@ -93,11 +96,51 @@ def milestones_text(value: Any) -> str:
     return ",".join(str(number) for number in values)
 
 
+class WebhookRateLimiter:
+    """Webhook 推送的滑动窗口频控：一个窗口内最多放行 limit 条。
+
+    纯逻辑、无 I/O；时钟可注入以便离线测试。约定单线程调用（监控页只在
+    GUI 线程申请名额），内部不加锁。超限的申请计入丢弃记录，供日志
+    输出「本小时已丢弃 N 条」的累计计数。
+    """
+
+    def __init__(self, limit: int = WEBHOOK_RATE_LIMIT,
+                 window_seconds: float = WEBHOOK_RATE_WINDOW_SECONDS,
+                 clock: Callable[[], float] = time.time):
+        self._limit = max(1, int(limit))
+        self._window_seconds = max(1.0, float(window_seconds))
+        self._clock = clock
+        self._sent: deque[float] = deque()
+        self._dropped: deque[float] = deque()
+
+    def try_acquire(self) -> bool:
+        """申请一个发送名额；窗口未满放行，超限记一次丢弃并返回 False。"""
+        now = float(self._clock())
+        self._purge(now)
+        if len(self._sent) >= self._limit:
+            self._dropped.append(now)
+            return False
+        self._sent.append(now)
+        return True
+
+    def dropped_in_window(self) -> int:
+        """当前滑动窗口内被丢弃的条数。"""
+        self._purge(float(self._clock()))
+        return len(self._dropped)
+
+    def _purge(self, now: float) -> None:
+        while self._sent and now - self._sent[0] >= self._window_seconds:
+            self._sent.popleft()
+        while self._dropped and now - self._dropped[0] >= self._window_seconds:
+            self._dropped.popleft()
+
+
 @dataclass(frozen=True)
 class AlertConfig:
     enabled: bool = False
     windows_enabled: bool = True
     sound_enabled: bool = False
+    webhook_enabled: bool = False
 
     milestone_enabled: bool = True
     milestones: tuple[int, ...] = DEFAULT_MILESTONES
@@ -127,6 +170,7 @@ class AlertConfig:
             enabled=_as_bool(data.get("enabled"), False),
             windows_enabled=_as_bool(data.get("windows_enabled"), True),
             sound_enabled=_as_bool(data.get("sound_enabled"), False),
+            webhook_enabled=_as_bool(data.get("webhook_enabled"), False),
             milestone_enabled=_as_bool(data.get("milestone_enabled"), True),
             milestones=milestones,
             stagnation_enabled=_as_bool(data.get("stagnation_enabled"), True),
@@ -147,6 +191,7 @@ class AlertConfig:
             "enabled": self.enabled,
             "windows_enabled": self.windows_enabled,
             "sound_enabled": self.sound_enabled,
+            "webhook_enabled": self.webhook_enabled,
             "milestone_enabled": self.milestone_enabled,
             "milestones": milestones_text(self.milestones),
             "stagnation_enabled": self.stagnation_enabled,

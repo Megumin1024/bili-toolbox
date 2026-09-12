@@ -17,15 +17,17 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox,
 from app.task_page import PresetBar
 from app.widgets import (LogPanel, PageHeader, PathRow, StatusPill, card, h2,
                          muted)
+from core import config as app_config
 from core.output import app_base_dir
 
 from .alerts import AlertConfig, AlertEvent, AlertSession, milestones_text
-from .notifications import QtNotificationAdapter
+from .notifications import QtNotificationAdapter, WebhookAdapter
 from .server import MonitorServer
 
 
 class MonitorPage(QWidget):
     monitor_event = Signal(object)
+    webhook_log = Signal(str)
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -35,9 +37,12 @@ class MonitorPage(QWidget):
         self._active_session_id = None
         self.alert_session = None
         self.notification_adapter = None
+        self.webhook_adapter = None
         self._recent_alerts = []
         self.setObjectName("transparent")
         self.monitor_event.connect(self._handle_monitor_event)
+        # Webhook 发送线程不能直接触碰 Qt 控件；日志经信号排队切回 GUI 线程。
+        self.webhook_log.connect(self._log)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
@@ -112,6 +117,29 @@ class MonitorPage(QWidget):
         channel_row.addWidget(self.alert_sound_check)
         channel_row.addStretch(1)
         alert_layout.addLayout(channel_row)
+
+        # Webhook 渠道独占一行（复选框 + URL + 测试按钮），避免给告警卡
+        # 再增一行高度——960×640 下卡片高度本就贴近视口上限。
+        webhook_row = QHBoxLayout()
+        webhook_row.setSpacing(8)
+        self.alert_webhook_check = QCheckBox("Webhook 推送")
+        self.alert_webhook_check.setChecked(False)
+        self.webhook_url_edit = QLineEdit()
+        self.webhook_url_edit.setPlaceholderText(
+            "https://…（接收端 URL，仅保存在本机配置文件）")
+        self.webhook_url_edit.setText(str(self.cfg.get("webhook_url") or ""))
+        self.webhook_url_edit.editingFinished.connect(self._save_webhook_url)
+        self.btn_test_webhook = QPushButton("发送测试")
+        self.btn_test_webhook.setObjectName("flat")
+        self.btn_test_webhook.clicked.connect(self.on_test_webhook)
+        webhook_row.addWidget(self.alert_webhook_check)
+        webhook_row.addWidget(self.webhook_url_edit, 1)
+        webhook_row.addWidget(self.btn_test_webhook)
+        alert_layout.addLayout(webhook_row)
+        alert_layout.addWidget(muted(
+            "POST JSON：{title, text, event_type}；用于 Server酱/Bark/企业微信等"
+            "需自建中转或支持通用 JSON 的服务。每小时最多推送 10 条，"
+            "URL 只保存在本机、不进入任务历史与预设。"))
 
         rule_grid = QGridLayout()
         rule_grid.setHorizontalSpacing(10)
@@ -208,6 +236,7 @@ class MonitorPage(QWidget):
         for checkbox in (
             self.alert_milestone_check, self.alert_stagnation_check,
             self.alert_spike_check, self.alert_disconnect_check,
+            self.alert_webhook_check,
         ):
             checkbox.toggled.connect(self._refresh_alert_rule_states)
         self._refresh_alert_rule_states()
@@ -287,11 +316,52 @@ class MonitorPage(QWidget):
                 self.notification_adapter = None
         return self.notification_adapter
 
+    def _new_webhook_adapter(self):
+        factory = self.cfg.get("_monitor_webhook_adapter_factory")
+        if callable(factory):
+            return factory()
+        return WebhookAdapter(
+            url_getter=self.webhook_url_edit.text,
+            log=self.webhook_log.emit,
+        )
+
+    def _ensure_webhook_adapter(self):
+        """懒创建并跨会话保留：频控预算不随监控重启而清零。"""
+        if self.webhook_adapter is None:
+            try:
+                self.webhook_adapter = self._new_webhook_adapter()
+            except Exception as exc:  # noqa: BLE001 - 通道失败不得影响监控
+                self._log(f"Webhook 适配器创建失败（{type(exc).__name__}）。")
+                self.webhook_adapter = None
+        return self.webhook_adapter
+
+    def _deliver_webhook(self, event_type, title, message, enabled):
+        """Webhook 唯一入口：未启用时零动作（不创建适配器、不创建线程）。"""
+        if not enabled:
+            return False
+        adapter = self._ensure_webhook_adapter()
+        if adapter is None:
+            return False
+        return bool(adapter.send(event_type, title, message))
+
+    def _save_webhook_url(self):
+        """URL 只落 config.json（与 proxy_spec 同级明文），不进历史/预设。
+
+        用最小字段保存而非整份 self.cfg：设置页持有的是 cfg 的副本，
+        整份回写会用副本里的旧值覆盖其他渠道刚保存的字段。
+        """
+        url = self.webhook_url_edit.text().strip()
+        if self.cfg.get("webhook_url") == url:
+            return
+        self.cfg["webhook_url"] = url
+        app_config.save({"webhook_url": url})
+
     def _alert_mapping_from_controls(self):
         return AlertConfig.from_mapping({
             "enabled": self.alert_total_check.isChecked(),
             "windows_enabled": self.alert_windows_check.isChecked(),
             "sound_enabled": self.alert_sound_check.isChecked(),
+            "webhook_enabled": self.alert_webhook_check.isChecked(),
             "milestone_enabled": self.alert_milestone_check.isChecked(),
             "milestones": self.alert_milestone_edit.text(),
             "stagnation_enabled": self.alert_stagnation_check.isChecked(),
@@ -311,6 +381,7 @@ class MonitorPage(QWidget):
         self.alert_total_check.setChecked(config.enabled)
         self.alert_windows_check.setChecked(config.windows_enabled)
         self.alert_sound_check.setChecked(config.sound_enabled)
+        self.alert_webhook_check.setChecked(config.webhook_enabled)
         self.alert_milestone_check.setChecked(config.milestone_enabled)
         self.alert_milestone_edit.setText(milestones_text(config.milestones))
         self.alert_stagnation_check.setChecked(config.stagnation_enabled)
@@ -338,6 +409,9 @@ class MonitorPage(QWidget):
             widget.setEnabled(self.alert_spike_check.isChecked())
         self.alert_disconnect_failures_spin.setEnabled(
             self.alert_disconnect_check.isChecked())
+        webhook_on = self.alert_webhook_check.isChecked()
+        self.webhook_url_edit.setEnabled(webhook_on)
+        self.btn_test_webhook.setEnabled(webhook_on)
 
     def _clear_recent_alerts(self):
         self._recent_alerts.clear()
@@ -411,12 +485,15 @@ class MonitorPage(QWidget):
         )
         if any(result is not None for result in results.values()):
             self._log(self._delivery_result_message("提醒", results))
+        self._deliver_webhook(
+            alert.kind, alert.title, alert.message, config.webhook_enabled)
 
     def on_test_alert(self):
         windows_enabled = self.alert_windows_check.isChecked()
         sound_enabled = self.alert_sound_check.isChecked()
-        if not windows_enabled and not sound_enabled:
-            message = "测试提醒未执行：请至少勾选 Windows 通知或声音提醒。"
+        webhook_enabled = self.alert_webhook_check.isChecked()
+        if not windows_enabled and not sound_enabled and not webhook_enabled:
+            message = "测试提醒未执行：请至少勾选一种提醒渠道。"
             self._log(message)
             QMessageBox.information(self, "测试提醒", message)
             return
@@ -425,6 +502,20 @@ class MonitorPage(QWidget):
             windows_enabled, sound_enabled,
         )
         self._log(self._delivery_result_message("测试提醒", results))
+        if webhook_enabled:
+            self._deliver_webhook(
+                "test", "监控提醒测试",
+                "这是一次测试推送，不会启动或改变监控。", True)
+
+    def on_test_webhook(self):
+        if not self.alert_webhook_check.isChecked():
+            self._log("Webhook 测试未发送：请先勾选「Webhook 推送」。")
+            return
+        self._save_webhook_url()
+        if self._deliver_webhook(
+                "test", "监控提醒测试",
+                "这是一次测试推送，不会启动或改变监控。", True):
+            self._log("Webhook 测试推送已提交，发送结果见后续日志。")
 
     def _on_server_event(self, event):
         """采集线程入口：只发 Qt Signal，不触碰控件或通知对象。"""
@@ -515,6 +606,8 @@ class MonitorPage(QWidget):
             self.server = None
         self.alert_session = None
         self._close_notification_adapter()
+        # webhook_adapter 不随会话关闭：它没有需要释放的 Qt/网络资源，
+        # 保留实例可让每小时 10 条的频控预算不被重启监控绕过。
         self.status_label.set_state("idle", "○ 未启动")
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
