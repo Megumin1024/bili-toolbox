@@ -20,7 +20,7 @@ TOOLS = [
              subtitle="批量视频公开数据快照/追踪 → Excel",
              icon="fa5s.chart-bar", factory=CollectorPage),
     ToolSpec(id="monitor", name="实时监控",
-             subtitle="视频实时数据仪表盘",
+             subtitle="视频/直播间实时数据仪表盘",
              icon="fa5s.broadcast-tower", factory=MonitorPage),
     ToolSpec(id="data_check", name="数据检查",
              subtitle="检查本地 Excel / JSONL，不修改源文件",

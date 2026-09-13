@@ -19,6 +19,7 @@ from app.task_page import PresetBar
 from app.widgets import (LogPanel, PageHeader, PathRow, StatusPill, card, h2,
                          muted)
 from core import config as app_config
+from core.live import parse_room_input
 from core.output import app_base_dir
 
 from .alerts import AlertConfig, AlertEvent, AlertSession, milestones_text
@@ -30,6 +31,9 @@ from .server import MonitorServer
 class MonitorPage(QWidget):
     monitor_event = Signal(object)
     webhook_log = Signal(str)
+    # 与 tools/__init__.py 的 ToolSpec.subtitle 成对（注册一致性由测试锁定），
+    # 页头长文案是它的展开形式，两处措辞需同步更新。
+    tool_subtitle = "视频/直播间实时数据仪表盘"
 
     def __init__(self, cfg, parent=None):
         super().__init__(parent)
@@ -63,7 +67,8 @@ class MonitorPage(QWidget):
 
         root.addWidget(PageHeader(
             "实时监控",
-            "视频实时数据仪表盘：播放 / 点赞 / 投币 / 收藏 / 分享 / 各分P正在看，历史趋势跨启动续接。",
+            "视频/直播间实时数据仪表盘：播放 / 点赞 / 投币 / 收藏 / 分享 / 各分P正在看；"
+            "直播间模式为人气与开播状态，历史趋势跨启动续接。",
             "实时监控",
         ))
 
@@ -77,9 +82,17 @@ class MonitorPage(QWidget):
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight)
         form.setSpacing(10)
+        # 「监控对象」选择：视频作品（默认，行为与历史版本一致）/ 直播间
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItem("视频作品", "video")
+        self.mode_combo.addItem("直播间", "live")
+        form.addRow("监控对象", self.mode_combo)
+        self.bvid_label = QLabel("视频 BV 号")
         self.bvid_edit = QLineEdit()
         self.bvid_edit.setPlaceholderText("示例：BV1xxxxxxxxx")
-        form.addRow("视频 BV 号", self.bvid_edit)
+        form.addRow(self.bvid_label, self.bvid_edit)
+        # 先接线后不会有初始化信号：addItem 阶段连接尚未建立
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
         self.interval_spin = QSpinBox()
         self.interval_spin.setRange(5, 3600)
         self.interval_spin.setValue(60)
@@ -216,6 +229,13 @@ class MonitorPage(QWidget):
         rule_grid.addWidget(self.alert_disconnect_check, 4, 0)
         rule_grid.addWidget(QLabel("连续失败次数"), 4, 1)
         rule_grid.addWidget(self.alert_disconnect_failures_spin, 4, 2)
+
+        # 仅直播间模式可见并生效（视频模式的采样里没有开播状态字段）
+        self.alert_live_flip_check = QCheckBox("开播/下播提醒")
+        self.alert_live_flip_check.setToolTip(
+            "开播↔下播↔轮播状态翻转时提醒一次；仅直播间模式可见并生效。")
+        self.alert_live_flip_check.setVisible(False)
+        rule_grid.addWidget(self.alert_live_flip_check, 5, 0)
         # 960×640 裁切根因（实测，MainWindow 内视口仅 734px）：QSpinBox 的
         # sizeHint 按取值上限位数预留宽度（增长/绝对增长上限 2^31-1 共 10 位），
         # 叠加「分钟冷却」等后缀，把 rule_grid 最小宽度推到 907px → 右缘裁切。
@@ -413,6 +433,30 @@ class MonitorPage(QWidget):
         self.cfg["webhook_format"] = value
         app_config.save({"webhook_format": value})
 
+    def _is_live_mode(self):
+        """当前监控对象是否直播间；__new__ 构造的假控件页面视为视频模式。"""
+        combo = getattr(self, "mode_combo", None)
+        return combo is not None and combo.currentData() == "live"
+
+    def _on_mode_changed(self):
+        """监控对象切换：只联动文案与可见性，绝不清空用户已填数字。"""
+        live = self._is_live_mode()
+        self.bvid_label.setText("直播间号/链接" if live else "视频 BV 号")
+        self.bvid_edit.setPlaceholderText(
+            "示例：直播间号或 live.bilibili.com/6" if live
+            else "示例：BV1xxxxxxxxx")
+        self.alert_milestone_check.setText("人气里程碑" if live else "播放量里程碑")
+        unit = " 人气" if live else " 播放"
+        self.alert_stagnation_growth_spin.setSuffix(unit)
+        self.alert_spike_absolute_spin.setSuffix(unit)
+        self.alert_live_flip_check.setVisible(live)
+
+    def _live_flip_checked(self):
+        """开播/下播提醒仅直播间模式生效；假控件页面（无该复选框）为 False。"""
+        check = getattr(self, "alert_live_flip_check", None)
+        return bool(check is not None and check.isChecked()
+                    and self._is_live_mode())
+
     def _alert_mapping_from_controls(self):
         return AlertConfig.from_mapping({
             "enabled": self.alert_total_check.isChecked(),
@@ -431,6 +475,7 @@ class MonitorPage(QWidget):
             "spike_cooldown_min": self.alert_spike_cooldown_spin.value(),
             "disconnect_enabled": self.alert_disconnect_check.isChecked(),
             "disconnect_failures": self.alert_disconnect_failures_spin.value(),
+            "live_flip_enabled": self._live_flip_checked(),
         })
 
     def _apply_alert_mapping(self, raw):
@@ -451,6 +496,9 @@ class MonitorPage(QWidget):
         self.alert_spike_cooldown_spin.setValue(config.spike_cooldown_min)
         self.alert_disconnect_check.setChecked(config.disconnect_enabled)
         self.alert_disconnect_failures_spin.setValue(config.disconnect_failures)
+        flip_check = getattr(self, "alert_live_flip_check", None)
+        if flip_check is not None:
+            flip_check.setChecked(config.live_flip_enabled)
         self._refresh_alert_rule_states()
 
     def _refresh_alert_rule_states(self):
@@ -589,7 +637,14 @@ class MonitorPage(QWidget):
             return
         event_type = event.get("type")
         if event_type == "sample_success":
-            alerts = self.alert_session.process_sample(event.get("ts"), event.get("view"))
+            # 字段访问层参数化：video 会话读 view，live 会话读 online，
+            # 并按 status_field 追加开播/下播翻转判断（video 会话为 None）。
+            session = self.alert_session
+            alerts = session.process_sample(
+                event.get("ts"), event.get(session.value_field))
+            if session.status_field:
+                alerts = alerts + session.process_status_flip(
+                    event.get("ts"), event.get(session.status_field))
         elif event_type == "sample_failure":
             alerts = self.alert_session.process_failure(
                 event.get("ts"), event.get("consecutive_failures"))
@@ -603,12 +658,20 @@ class MonitorPage(QWidget):
             "bvid": self.bvid_edit.text().strip(),
             "interval": self.interval_spin.value(),
             "data_dir": self.data_row.value(),
+            "mode": "live" if self._is_live_mode() else "video",
         }
         if hasattr(self, "alert_total_check"):
             params["alerts"] = self._alert_mapping_from_controls().to_mapping()
         return params
 
     def apply_preset_params(self, params):
+        # 旧预设/历史无 mode 键 → 默认视频模式；非法值同样回落 video。
+        mode = str(params.get("mode") or "video")
+        if mode not in ("video", "live"):
+            mode = "video"
+        mode_combo = getattr(self, "mode_combo", None)
+        if mode_combo is not None:
+            mode_combo.setCurrentIndex(1 if mode == "live" else 0)
         self.bvid_edit.setText(str(params.get("bvid", "")))
         try:
             self.interval_spin.setValue(int(params.get("interval", 60)))
@@ -626,24 +689,39 @@ class MonitorPage(QWidget):
     def on_start(self):
         if self.server is not None and self.server.running:
             return
-        raw = self.bvid_edit.text().strip() or self.bvid_edit.placeholderText()
-        m = re.search(r"BV[0-9A-Za-z]{10}", raw)  # BV 区分大小写，保留原样
-        if not m:
-            self.status_label.set_state("error", "✕ BV 号格式有误")
-            return
+        if self._is_live_mode():
+            # live 输入只认用户键入内容（不回落 placeholder，避免示例
+            # 链接 live.bilibili.com/6 被当成真实目标）。
+            try:
+                room_id = parse_room_input(self.bvid_edit.text().strip())
+            except ValueError as exc:
+                self.status_label.set_state("error", f"✕ {exc}")
+                return
+            target_kwargs = {"mode": "live", "room_id": room_id}
+        else:
+            raw = self.bvid_edit.text().strip() or self.bvid_edit.placeholderText()
+            m = re.search(r"BV[0-9A-Za-z]{10}", raw)  # BV 区分大小写，保留原样
+            if not m:
+                self.status_label.set_state("error", "✕ BV 号格式有误")
+                return
+            target_kwargs = {"bvid": m.group(0)}
         self._session_generation += 1
         session_id = f"monitor-{self._session_generation}"
         self._active_session_id = session_id
+        live = target_kwargs.get("mode") == "live"
         self.alert_session = AlertSession(
-            self._alert_mapping_from_controls(), session_id=session_id)
+            self._alert_mapping_from_controls(), session_id=session_id,
+            value_field="online" if live else "view",
+            status_field="live_status" if live else None,
+            value_label="人气" if live else "播放量")
         self._clear_recent_alerts()
         self.server = MonitorServer(
-            bvid=m.group(0),
             interval=self.interval_spin.value(),
             data_dir=self.data_row.value(),
             log=self._log,
             event_callback=self._on_server_event,
-            session_id=session_id)
+            session_id=session_id,
+            **target_kwargs)
         url = self.server.start()
         self.status_label.set_state("running", f"● 运行中 · {url}")
         # 小窗下 pill 文本可能被截断，完整仪表盘地址挂在 tooltip。

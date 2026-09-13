@@ -163,12 +163,12 @@
 <main>
   <section class="cards" id="cards"></section>
   <section class="grid">
-    <div class="panel wide"><h2>播放量增长 <small>本次监控期间</small></h2><div id="chart-view" class="chart tall"></div></div>
-    <div class="panel"><h2>实时在线人数 <small>各分P · “正在看”</small></h2><div id="chart-online" class="chart"></div></div>
-    <div class="panel"><h2>互动指标趋势 <small>点赞 / 投币 / 收藏 / 分享</small></h2><div id="chart-interact" class="chart"></div></div>
+    <div class="panel wide"><h2><span id="panel-view-title">播放量增长</span> <small>本次监控期间</small></h2><div id="chart-view" class="chart tall"></div></div>
+    <div class="panel" id="panel-online"><h2>实时在线人数 <small>各分P · “正在看”</small></h2><div id="chart-online" class="chart"></div></div>
+    <div class="panel" id="panel-interact"><h2>互动指标趋势 <small>点赞 / 投币 / 收藏 / 分享</small></h2><div id="chart-interact" class="chart"></div></div>
     <div class="panel wide"><h2>每分钟增量 <small>相邻两次采集的折合速率</small></h2><div id="chart-delta" class="chart"></div></div>
-    <div class="panel"><h2>互动率 <small>占播放量比例</small></h2><div id="chart-ratio" class="chart"></div></div>
-    <div class="panel"><h2>分析结论</h2><div id="analysis" class="analysis">等待数据…</div></div>
+    <div class="panel" id="panel-ratio"><h2>互动率 <small>占播放量比例</small></h2><div id="chart-ratio" class="chart"></div></div>
+    <div class="panel" id="panel-analysis"><h2>分析结论</h2><div id="analysis" class="analysis">等待数据…</div></div>
   </section>
 </main>
 
@@ -344,7 +344,135 @@ function main() {
        <div>三连率（赞+币+藏）：<b>${trioRate === null ? '—' : trioRate.toFixed(2) + '%'}</b>，赞/投币比：<b>${likeCoin ? likeCoin.toFixed(2) + ' : 1' : '—'}</b></div>${session}`;
   }
 
+  // ---------- 直播间模式（/api/latest 带 mode:"live" 时走本分支） ----------
+
+  function liveStatusBadge(status) {
+    const map = { 1: ['直播中', 'var(--green)'], 0: ['未开播', 'var(--muted)'], 2: ['轮播', 'var(--orange)'] };
+    const hit = map[status];
+    const text = hit ? hit[0] : '未知(' + status + ')';
+    const color = hit ? hit[1] : 'var(--danger)';
+    return `<span style="color:${color};font-weight:600">● ${text}</span>`;
+  }
+
+  function renderLiveCards(latest, samples) {
+    const host = document.getElementById('cards');
+    const peak = Math.max(0, ...samples.map(s => Number(s.online) || 0));
+    const first = samples.length ? samples[0] : null;
+    const delta = (first && latest.online !== null && latest.online !== undefined
+      && first.online !== null && first.online !== undefined)
+      ? latest.online - first.online : null;
+    const foot = delta !== null
+      ? `本次监控 <span class="up">${delta > 0 ? '+' : ''}${fmt(delta)}</span> · 平台人气值口径`
+      : '<span class="dim">平台人气值口径，非精确观看人数</span>';
+    host.innerHTML = `
+      <div class="card">
+        <div class="label"><span>人气</span><span class="ico">🔥</span></div>
+        <div class="value">${fmt(latest.online)}</div>
+        <div class="foot" title="精确值 ${full(latest.online)}">${foot}</div>
+      </div>
+      <div class="card">
+        <div class="label"><span>监控期峰值</span><span class="ico">📈</span></div>
+        <div class="value">${fmt(peak)}</div>
+        <div class="foot">本次监控期间人气最高值</div>
+      </div>
+      <div class="card">
+        <div class="label"><span>开播状态</span><span class="ico">📡</span></div>
+        <div class="value" style="font-size:20px">${liveStatusBadge(latest.live_status)}</div>
+        <div class="foot">0 未开播 / 1 直播中 / 2 轮播</div>
+      </div>`;
+  }
+
+  function renderLiveAnalysis(latest, samples) {
+    const el = document.getElementById('analysis');
+    let session = '';
+    const first = samples[0];
+    if (samples.length >= 2) {
+      const mins = (samples[samples.length - 1].ts - first.ts) / 60;
+      const dOnline = (latest.online ?? 0) - (first.online ?? 0);
+      const perHour = n => mins > 0.2 ? fmt(n / mins * 60) + ' /小时' : '采样时间过短';
+      const peak = Math.max(0, ...samples.map(s => Number(s.online) || 0));
+      session = `<div class="sec">· 本次监控（${tstr(first.ts)} 起，共 ${samples.length} 次采样，${mins.toFixed(0)} 分钟）</div>
+        <div>人气变化：<b>${dOnline > 0 ? '+' : ''}${fmt(dOnline)}</b>（折合 ${perHour(dOnline)}），峰值：<b>${fmt(peak)}</b></div>`;
+    }
+    el.innerHTML =
+      `<div class="sec">· 直播间概况</div>
+       <div>当前标题：<b>${latest.title || '—'}</b></div>
+       <div>当前人气：<b>${fmt(latest.online)}</b>（精确值 ${full(latest.online)}）</div>${session}`;
+  }
+
+  function renderLive(latestData, samples) {
+    // live 分支：隐藏视频专属面板，主图与增量序列换成人气
+    document.getElementById('panel-online').style.display = 'none';
+    document.getElementById('panel-interact').style.display = 'none';
+    document.getElementById('panel-ratio').style.display = 'none';
+    document.getElementById('panel-analysis').classList.add('wide');
+    document.getElementById('panel-view-title').textContent = '人气变化';
+    const meta = latestData.meta || {};
+    const latest = latestData.latest;
+    if (!latest) { setStatus('err', '暂无数据，等待首次采集…'); return; }
+
+    const link = `https://live.bilibili.com/${meta.room_id}`;
+    const titleEl = document.getElementById('v-title');
+    titleEl.textContent = meta.title || `直播间 ${meta.room_id}`;
+    titleEl.href = link;
+    const area = [meta.parent_area_name, meta.area_name].filter(Boolean).join(' · ') || '—';
+    document.getElementById('v-meta').innerHTML =
+      `${liveStatusBadge(meta.live_status)}（${meta.live_status_label || '—'}）　·　主播 UID：${meta.uid ?? '—'}　·　分区：${area}　·　开播时刻：${meta.live_time || '—'}　·　房间 ${meta.room_id}
+       <br>直播间链接：<a href="${link}" target="_blank" rel="noopener">${link}</a>`;
+
+    if (latestData.error) {
+      setStatus('err', `采集异常：${latestData.error}`);
+    } else {
+      setStatus('ok', `正常 · 已采样 ${latestData.sample_count} 次`);
+    }
+    document.getElementById('updated').textContent = `最后更新：${tstr(latest.ts)}（服务器时间 ${tstr(latestData.server_time)}）`;
+    document.getElementById('foot-interval').textContent = latestData.interval;
+    nextTickAt = Date.now() + latestData.interval * 1000;
+
+    const net = latestData.net;
+    if (net) {
+      const parts = [];
+      parts.push(net.transport_active && net.transport_active !== '-'
+        ? net.transport_active : (net.transport_preferred || 'auto'));
+      if (net.proxy) {
+        parts.push(net.proxy.size > 1
+          ? `${net.proxy.current}（池${net.proxy.size}·轮换${net.proxy.rotations}次）`
+          : net.proxy.current);
+      }
+      const st = net.stats || {};
+      if (st.risk_events) parts.push(`风控拦截${st.risk_events}次`);
+      if (st.last_latency_ms) parts.push(st.last_latency_ms + 'ms');
+      document.getElementById('net-info').textContent = parts.join(' · ');
+    }
+
+    renderLiveCards(latest, samples);
+
+    charts['chart-view'].setOption(timeOption([
+      lineSeries('人气', samples.map(s => [s.ts * 1000, s.online]), C.online, {
+        areaStyle: { color: { type: 'linear', x: 0, y: 0, x2: 0, y2: 1,
+          colorStops: [{ offset: 0, color: 'rgba(105,215,176,0.38)' }, { offset: 1, color: 'rgba(105,215,176,0.01)' }] } }
+      })
+    ]), true);
+
+    const deltaSeries = [];
+    if (samples.length >= 2) {
+      const pts = [];
+      for (let i = 1; i < samples.length; i++) {
+        const a = samples[i - 1], b = samples[i];
+        if (a.online === null || a.online === undefined
+            || b.online === null || b.online === undefined) continue;
+        const mins = Math.max((b.ts - a.ts) / 60, 1 / 60);
+        pts.push([b.ts * 1000, (b.online - a.online) / mins]);
+      }
+      deltaSeries.push({ name: '人气/分钟', type: 'bar', data: pts, barMaxWidth: 18, itemStyle: { color: C.online } });
+    }
+    charts['chart-delta'].setOption(timeOption(deltaSeries, true), true);
+
+    renderLiveAnalysis(latest, samples);
+  }
+
   function render(latestData, samples) {
+    if (latestData.mode === 'live') { renderLive(latestData, samples); return; }
     const meta = latestData.meta;
     const latest = latestData.latest;
     if (!latest) { setStatus('err', '暂无数据，等待首次采集…'); return; }

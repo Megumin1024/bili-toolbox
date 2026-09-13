@@ -9,8 +9,9 @@ MonitorServer 生命周期：
 
 采集:  /x/web-interface/view       播放/弹幕/评论/点赞/投币/收藏/分享
        /x/player/online/total      各分P实时"正在看"人数
+       /room/v1/Room/get_info      直播间模式：live_status/人气/标题（单轮 1 次）
 服务:  /                仪表盘页面（tools/monitor/static）
-       /api/latest      最新样本 + 视频元信息 + 网络通道状态
+       /api/latest      最新样本 + 元信息（视频或直播间）+ 网络通道状态
        /api/history     全部历史样本
 """
 import json
@@ -22,6 +23,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from core import session
+from core.live import get_info_url, parse_get_info
 from core.redact import sanitize_text
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -48,10 +50,12 @@ def to_int(v):
 
 
 class _State:
-    def __init__(self, bvid, interval):
+    def __init__(self, bvid, interval, mode="video", room_id=None):
         self.lock = threading.Lock()
         self.bvid = bvid
         self.interval = interval
+        self.mode = mode
+        self.room_id = room_id
         self.meta = None
         self.samples = []
         self.last_ok_ts = None
@@ -59,12 +63,21 @@ class _State:
 
 
 class MonitorServer:
-    """一个实例 = 一个视频的采集 + 仪表盘服务。start() 后通过 url 访问。"""
+    """一个实例 = 一个目标（视频或直播间）的采集 + 仪表盘服务。"""
 
-    def __init__(self, bvid, interval=60,
+    def __init__(self, bvid=None, interval=60,
                  data_dir=None, log=None,
-                 event_callback=None, session_id=None):
-        self.bvid = bvid
+                 event_callback=None, session_id=None,
+                 mode="video", room_id=None):
+        self.mode = "live" if str(mode or "").lower() == "live" else "video"
+        if self.mode == "live":
+            if room_id is None:
+                raise ValueError("live 模式需要 room_id（直播间号）")
+            self.room_id = int(room_id)
+            self.bvid = None
+        else:
+            self.room_id = None
+            self.bvid = bvid
         self.interval = max(5, min(3600, int(interval)))
         self.log = log or (lambda msg: print(f"[{time.strftime('%H:%M:%S')}] {msg}",
                                              flush=True))
@@ -72,8 +85,13 @@ class MonitorServer:
         self.session_id = str(session_id or uuid.uuid4().hex)
         self.data_dir = Path(data_dir) if data_dir else Path("data")
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.history_file = self.data_dir / f"history_{bvid}.jsonl"
-        self.state = _State(bvid, self.interval)
+        if self.mode == "live":
+            # live 专用历史文件名，防止与视频历史混用
+            self.history_file = self.data_dir / f"history_live_{self.room_id}.jsonl"
+        else:
+            self.history_file = self.data_dir / f"history_{self.bvid}.jsonl"
+        self.state = _State(self.bvid, self.interval,
+                            mode=self.mode, room_id=self.room_id)
         # 复用进程级 session 单例（设置页启动/保存时已按相同参数 configure），
         # 不再自建 BiliClient——两者本就共用 shared_gate()。注意 stop() 不得
         # 关闭这个共享客户端，它的生命周期归 session 管理。
@@ -155,6 +173,38 @@ class MonitorServer:
         }
         return meta, sample
 
+    def collect_once_live(self, room_id):
+        """采集一次直播间，返回 (meta, sample)。单轮仅 1 次 get_info 请求。
+
+        输入短号在响应 data.room_id 里归一为真实房间号（core.live.parse_get_info）。
+        样本保持扁平：ts/live_status/online/title，人气为平台人气值口径。
+        """
+        row = parse_get_info(
+            self._http_json(get_info_url(room_id)), fallback_room=int(room_id))
+        meta = {
+            "room_id": row["room_id"],
+            "uid": row["uid"],
+            "title": row["title"],
+            "live_status": row["live_status"],
+            "live_status_label": row["live_status_label"],
+            "parent_area_name": row["parent_area_name"],
+            "area_name": row["area_name"],
+            "live_time": row["live_time"],
+        }
+        sample = {
+            "ts": int(time.time()),
+            "live_status": row["live_status"],
+            "online": row["online"],
+            "title": row["title"],
+        }
+        return meta, sample
+
+    def _history_item_matches(self, item):
+        """历史行与当前目标匹配；live 专用文件里同时挡掉视频形状的行。"""
+        if self.state.mode == "live":
+            return "live_status" in item and "bvid" not in item
+        return item.get("bvid") == self.bvid
+
     def _load_history(self):
         if not self.history_file.is_file():
             return
@@ -169,7 +219,7 @@ class MonitorServer:
                         item = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if item.get("bvid") == self.bvid:
+                    if self._history_item_matches(item):
                         self.state.samples.append(item)
                         loaded += 1
         except OSError as exc:
@@ -190,7 +240,10 @@ class MonitorServer:
         while not self._stop.is_set():
             started = time.time()
             try:
-                meta, sample = self.collect_once(self.bvid)
+                if self.state.mode == "live":
+                    meta, sample = self.collect_once_live(self.room_id)
+                else:
+                    meta, sample = self.collect_once(self.bvid)
                 with self.state.lock:
                     self.state.meta = meta
                     self.state.samples.append(sample)
@@ -203,16 +256,29 @@ class MonitorServer:
                 except OSError as exc:
                     self.log(f"写入历史数据失败: {exc}")
                 fails = 0
-                self.log(f"采集成功 播放={sample['view']} 点赞={sample['like']} "
-                         f"正在看={sample['online']} | "
-                         f"通道={self.client.stats['last_transport']} "
-                         f"{self.client.stats['last_latency_ms']}ms")
-                self._emit_event({
-                    "type": "sample_success",
-                    "session_id": self.session_id,
-                    "ts": sample.get("ts"),
-                    "view": sample.get("view"),
-                })
+                if self.state.mode == "live":
+                    self.log(f"采集成功 人气={sample['online']} "
+                             f"状态={sample['live_status']} | "
+                             f"通道={self.client.stats['last_transport']} "
+                             f"{self.client.stats['last_latency_ms']}ms")
+                    self._emit_event({
+                        "type": "sample_success",
+                        "session_id": self.session_id,
+                        "ts": sample.get("ts"),
+                        "online": sample.get("online"),
+                        "live_status": sample.get("live_status"),
+                    })
+                else:
+                    self.log(f"采集成功 播放={sample['view']} 点赞={sample['like']} "
+                             f"正在看={sample['online']} | "
+                             f"通道={self.client.stats['last_transport']} "
+                             f"{self.client.stats['last_latency_ms']}ms")
+                    self._emit_event({
+                        "type": "sample_success",
+                        "session_id": self.session_id,
+                        "ts": sample.get("ts"),
+                        "view": sample.get("view"),
+                    })
             except Exception as exc:  # noqa: BLE001
                 fails += 1
                 # last_error 会经 GET /api/latest 离开进程，出口处强制脱敏
@@ -297,6 +363,10 @@ class MonitorServer:
                         "last_ok_ts": st.last_ok_ts,
                         "error": st.last_error,
                     }
+                    # mode 键只在 live 模式出现：video 模式 /api/latest
+                    # 键集合与历史行为零变化（前端按 undefined 走视频分支）。
+                    if st.mode == "live":
+                        payload["mode"] = "live"
                 try:
                     payload["net"] = session.info()
                 except Exception:  # noqa: BLE001 - 面板信息不因统计失败而失败
@@ -330,7 +400,9 @@ class MonitorServer:
         threading.Thread(target=self._poller_loop, daemon=True).start()
         self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._make_handler())
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
-        self.log(f"监控 {self.bvid} | 间隔 {self.interval}s | "
+        target = (f"直播间 {self.room_id}" if self.mode == "live"
+                  else str(self.bvid))
+        self.log(f"监控 {target} | 间隔 {self.interval}s | "
                  f"代理池 {self.client.pool.status()['size']} 项 | {self.url}")
         return self.url
 

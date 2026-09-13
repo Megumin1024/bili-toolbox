@@ -13,6 +13,8 @@ import re
 import time
 from typing import Any, Callable, Mapping
 
+from core.live import live_status_label, status_transition
+
 
 DEFAULT_MILESTONES = (10000, 50000, 100000, 500000, 1000000)
 MAX_INTEGER_DIGITS = 20
@@ -158,6 +160,9 @@ class AlertConfig:
     disconnect_enabled: bool = True
     disconnect_failures: int = 3
 
+    # 直播间模式专用：开播/下播/轮播翻转提醒（仅勾选时启用，视频模式无此事件）
+    live_flip_enabled: bool = False
+
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> "AlertConfig":
         data = raw if isinstance(raw, Mapping) else {}
@@ -184,6 +189,7 @@ class AlertConfig:
             spike_cooldown_min=_as_int(data.get("spike_cooldown_min"), 10, 0, 10080),
             disconnect_enabled=_as_bool(data.get("disconnect_enabled"), True),
             disconnect_failures=_as_int(data.get("disconnect_failures"), 3, 1, 100),
+            live_flip_enabled=_as_bool(data.get("live_flip_enabled"), False),
         )
 
     def to_mapping(self) -> dict[str, Any]:
@@ -204,6 +210,7 @@ class AlertConfig:
             "spike_cooldown_min": self.spike_cooldown_min,
             "disconnect_enabled": self.disconnect_enabled,
             "disconnect_failures": self.disconnect_failures,
+            "live_flip_enabled": self.live_flip_enabled,
         }
 
 
@@ -252,9 +259,19 @@ class AlertSession:
     """一次监控启动对应的提醒状态机。"""
 
     def __init__(self, config: AlertConfig | Mapping[str, Any] | None = None,
-                 session_id: str = ""):
+                 session_id: str = "",
+                 value_field: str = "view",
+                 status_field: str | None = None,
+                 value_label: str = "播放量"):
         self.config = config if isinstance(config, AlertConfig) else AlertConfig.from_mapping(config)
         self.session_id = str(session_id or "session")
+        # 字段访问层参数化（仅此两处）：value_field/status_field 决定读事件里
+        # 哪个字段（video 读 "view"，live 读 "online" 与 "live_status"），
+        # value_label 只替换事件文案里硬编码的「播放量」字样（live 传「人气」）。
+        # 规则数学与下面的会话状态语义不动——取值后走同一套窗口规则。
+        self.value_field = str(value_field or "view")
+        self.status_field = str(status_field) if status_field else None
+        self.value_label = str(value_label or "播放量")
         self._baseline_set = False
         self._last_ts: float | None = None
         self._last_view: int | None = None
@@ -270,6 +287,7 @@ class AlertSession:
         self._stagnation_active = False
         self._last_spike_ts: float | None = None
         self._disconnect_alerted = False
+        self._last_status: int | None = None
         self._stopped = False
 
     @property
@@ -351,7 +369,8 @@ class AlertSession:
                 self._fired_milestones.update(crossed)
                 values = "、".join(str(value) for value in crossed)
                 events.append(self._event(
-                    "milestone", "播放量里程碑", f"播放量已达到 {values}。", sample_ts))
+                    "milestone", f"{self.value_label}里程碑",
+                    f"{self.value_label}已达到 {values}。", sample_ts))
 
         if recovering:
             # 恢复样本可以继续判断里程碑，但不能把断线前的窗口带入停滞/突增。
@@ -371,7 +390,7 @@ class AlertSession:
                     self._stagnation_active = True
                     events.append(self._event(
                         "stagnation", "增长停滞",
-                        f"最近 {self.config.stagnation_window_min} 分钟播放量增长 {growth}，未超过允许值。",
+                        f"最近 {self.config.stagnation_window_min} 分钟{self.value_label}增长 {growth}，未超过允许值。",
                         sample_ts))
 
         if (self.config.spike_enabled and previous_view is not None
@@ -390,7 +409,7 @@ class AlertSession:
                         and cooldown_ok):
                     self._last_spike_ts = sample_ts
                     events.append(self._event(
-                        "spike", "播放量异常突增",
+                        "spike", f"{self.value_label}异常突增",
                         f"最近 {self.config.spike_window_min} 分钟增长 {absolute_growth}（{relative_growth:.1f}%）。",
                         sample_ts))
 
@@ -411,6 +430,41 @@ class AlertSession:
         return [self._event(
             "disconnect", "监控断线",
             f"已连续采集失败 {failures} 次。", failure_ts)]
+
+    def process_status_flip(self, ts: Any, status: Any) -> list[AlertEvent]:
+        """live_status_flip 规则：开播↔下播↔轮播翻转，翻转一条、不重复。
+
+        仅 live 模式由页面喂入 status_field 对应的样本值；video 会话从不
+        调用。首个有效状态只建立基线；None/未知状态（含 -1）不更新基线、
+        也不触发；相邻两轮状态相同则不重复。
+        """
+        if self._stopped or not self.config.enabled or not self.config.live_flip_enabled:
+            return []
+        sample_ts = _timestamp(ts)
+        if sample_ts is None:
+            return []
+        if isinstance(status, bool) or not isinstance(status, int) \
+                or status not in (0, 1, 2):
+            return []
+        prev = self._last_status
+        if prev is None:
+            self._last_status = status
+            return []
+        if status == prev:
+            return []
+        self._last_status = status
+        flipped, kind = status_transition(prev, status)
+        if not flipped:
+            return []
+        if kind == "live":
+            title, message = "开播提醒", "直播状态变化：未开播 → 直播中。"
+        elif kind == "offline":
+            title, message = "下播提醒", "直播状态变化：直播中 → 未开播。"
+        else:
+            title = "直播状态变化提醒"
+            message = (f"直播状态变化：{live_status_label(prev)} → "
+                       f"{live_status_label(status)}。")
+        return [self._event("live_status_flip", title, message, sample_ts)]
 
     def _window_anchor(self, current_ts: float, window_min: int) -> tuple[float, int] | None:
         state = self._window_states.get(window_min)

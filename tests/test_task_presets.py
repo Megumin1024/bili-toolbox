@@ -258,9 +258,11 @@ class TaskPresetPageTests(unittest.TestCase):
         page.interval_spin = _SpinField(60)
         page.data_row = _PathField("")
         params = page.collect_preset_params()
-        # transport 下拉已移除：新参数不再携带 transport 键
+        # transport 下拉已移除：新参数不再携带 transport 键。
+        # mode 键为 2026-09-13「直播间模式」任务卡 C.3 要求（预期新增，
+        # __new__ 假控件页面无 mode 下拉，按默认视频模式落键）。
         self.assertEqual(params, {
-            "bvid": "", "interval": 60, "data_dir": "",
+            "bvid": "", "interval": 60, "data_dir": "", "mode": "video",
         })
         with patch.object(MonitorPage, "on_start") as start:
             # 旧参数携带的 transport 键必须被容忍并忽略
