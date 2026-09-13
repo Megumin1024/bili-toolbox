@@ -6,13 +6,15 @@
 main.py
   └─ app/main_window.py
        ├─ app/theme.py / app/widgets.py / app/task_page.py / app/task_runner.py
-       └─ tools/__init__.py                          ← ToolSpec 注册表（7 个工具）
+       └─ tools/__init__.py                          ← ToolSpec 注册表（9 个工具）
             ├─ tools/comments/page.py        ─┐
             ├─ tools/collector/page.py        │
             ├─ tools/data_check/page.py       ├─ 各自的 pipeline.py / core.py
             ├─ tools/report_center/page.py    │
             ├─ tools/user_dynamics/page.py    │
-            ├─ tools/danmaku/page.py         ─┘
+            ├─ tools/danmaku/page.py         │
+            ├─ tools/relation_analysis/page.py
+            ├─ tools/live_room/page.py       ─┘
             └─ tools/monitor/page.py
                          │
                          ├─ tools/monitor/server.py → core/
@@ -24,6 +26,7 @@ core/                                    ← 不允许 import app/ 或 tools/
   ├─ 可靠性内核：net_errors.py / backoff.py / cancel.py / gate.py
   │              risk.py / redact.py
   ├─ 配置与状态：config.py / task_history.py / task_presets.py
+  ├─ 推送与领域：notify.py / live.py
   └─ 输出与文本：output.py / xlsx.py / text.py / links.py / diagnostics.py
 ```
 
@@ -66,7 +69,7 @@ core/                                    ← 不允许 import app/ 或 tools/
 | 监控指标 | `server.py`、静态页面和契约测试 | 服务端与前端字段同时兼容 |
 | 配置字段 | 配置读写和设置页 | 旧配置启动、保存、重启恢复 |
 | 依赖/打包 | `requirements.txt`、`main.py`、spec、环境脚本 | 官方 Python、干净 PATH、EXE 启动 |
-| 共享 `core/` | 只有明确授权时 | 全部 7 个工具的回归测试和保护性 diff；`scripts/check_boundaries.py` |
+| 共享 `core/` | 只有明确授权时 | 全部 9 个工具的回归测试和保护性 diff；`scripts/check_boundaries.py` |
 
 ## 防止功能杂糅的规则
 
