@@ -12,8 +12,10 @@ import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
+from zipfile import ZipFile
 
 from openpyxl import load_workbook
+from openpyxl import Workbook
 
 from tools.comments import core as comments_core
 from tools.collector import core as collector_core
@@ -253,6 +255,57 @@ class ReportCenterCoreTests(unittest.TestCase):
         compare_output = core.export_file_comparison(comparison, self.root / "reports", "XLSX")
         self.assertTrue(compare_output.is_file())
 
+    def test_comparison_xlsx_percentages_are_excel_ratios(self):
+        left = self.write_jsonl("ratio-left.jsonl", [comment_row(1, like=1)])
+        right = self.write_jsonl("ratio-right.jsonl", [comment_row(1, like=4)])
+        comparison = core.compare_sources(left, right)
+        output = core.export_file_comparison(comparison, self.root / "reports", "XLSX")
+
+        workbook = load_workbook(output, data_only=False)
+        sheet = workbook["指标变化"]
+        like_row = next(row for row in sheet.iter_rows()
+                        if row[0].value == "like")
+        self.assertEqual(like_row[4].value, 3)
+        self.assertEqual(like_row[4].data_type, "n")
+        self.assertEqual(like_row[4].number_format, "0.0%")
+        workbook.close()
+
+        period_path = self.write_jsonl("ratio-period.jsonl", [
+            monitor_row(BASE_TS, 100), monitor_row(BASE_TS + 3600, 400),
+            monitor_row(BASE_TS + 86400, 200), monitor_row(BASE_TS + 90000, 800),
+        ])
+        period = core.compare_periods(
+            period_path,
+            (core.parse_epoch_seconds(BASE_TS), core.parse_epoch_seconds(BASE_TS + 3600)),
+            (core.parse_epoch_seconds(BASE_TS + 86400),
+             core.parse_epoch_seconds(BASE_TS + 90000)),
+            "view",
+        )
+        period_output = core.export_period_comparison(period, self.root / "reports", "XLSX")
+        period_book = load_workbook(period_output, data_only=False)
+        period_sheet = period_book["时间段汇总"]
+        percent_row = next(row for row in period_sheet.iter_rows()
+                           if row[0].value == "百分比变化")
+        for cell in percent_row[1:3]:
+            self.assertEqual(cell.value, 3)
+            self.assertEqual(cell.data_type, "n")
+            self.assertEqual(cell.number_format, "0.0%")
+        period_book.close()
+
+    def test_noncomputable_file_percentage_stays_blank_with_explanation(self):
+        left = self.write_jsonl("zero-left.jsonl", [comment_row(1, like=0)])
+        right = self.write_jsonl("zero-right.jsonl", [comment_row(1, like=1)])
+        comparison = core.compare_sources(left, right)
+        output = core.export_file_comparison(comparison, self.root / "reports", "XLSX")
+
+        workbook = load_workbook(output, data_only=False)
+        sheet = workbook["指标变化"]
+        like_row = next(row for row in sheet.iter_rows()
+                        if row[0].value == "like")
+        self.assertIsNone(like_row[4].value)
+        self.assertIn("A 值为 0", like_row[8].value)
+        workbook.close()
+
     def test_comparison_exports_reject_sources_changed_after_generation(self):
         left = self.write_jsonl("comparison-left.jsonl", [comment_row(1, like=1)])
         right = self.write_jsonl("comparison-right.jsonl", [comment_row(1, like=2)])
@@ -302,6 +355,40 @@ class ReportCenterCoreTests(unittest.TestCase):
         self.assertEqual({row["rpid"] for row in exported}, {1, 2})
         self.assertEqual(core.snapshot_source(path), before)
 
+    def test_xlsx_metadata_skip_requires_a_complete_marked_pair(self):
+        cases = (
+            ("only-quality", (("数据质量", True),)),
+            ("only-fields", (("字段说明", True),)),
+            ("one-marked", (("数据质量", True), ("字段说明", False))),
+        )
+        for name, sheets in cases:
+            with self.subTest(name=name):
+                path = self.root / f"{name}.xlsx"
+                workbook = Workbook()
+                workbook.remove(workbook.active)
+                for sheet_name, marked in sheets:
+                    sheet = workbook.create_sheet(sheet_name)
+                    sheet.append(["rpid", "评论内容"])
+                    sheet.append([1, "普通记录"])
+                    sheet.append(["BiliToolbox:XLSX_METADATA:v1"] if marked else ["普通同名表"])
+                workbook.save(path)
+                workbook.close()
+                layout = core._xlsx_layout(path)
+                self.assertEqual(layout[1], sheets[0][0])
+
+        complete = self.root / "complete.xlsx"
+        workbook = Workbook()
+        workbook.remove(workbook.active)
+        for sheet_name in ("数据质量", "字段说明"):
+            sheet = workbook.create_sheet(sheet_name)
+            sheet.append(["普通表头"])
+            sheet.append(["BiliToolbox:XLSX_METADATA:v1"])
+        workbook.save(complete)
+        workbook.close()
+        kind, sheet_name, *_rest = core._xlsx_layout(complete)
+        self.assertEqual(kind, core.KIND_UNKNOWN)
+        self.assertEqual(sheet_name, "")
+
     def test_content_only_hit_exports_only_matching_rows(self):
         path = self.write_jsonl("comments.jsonl", [
             comment_row(1, message="needle in first row"), comment_row(2, message="second"),
@@ -350,7 +437,10 @@ class ReportCenterCoreTests(unittest.TestCase):
         headers = {cell.value: index for index, cell in enumerate(sheet[1])}
         rows = list(sheet.iter_rows(min_row=2, values_only=True))
         messages = [row[headers["message"]] for row in rows]
-        self.assertEqual(messages, ["control", "'=1+1", "'+SUM(A1)", "'-cmd", "'@cmd"])
+        self.assertEqual(messages, ["control", "=1+1", "+SUM(A1)", "-cmd", "@cmd"])
+        message_cells = [row[headers["message"]] for row in sheet.iter_rows(min_row=2)]
+        self.assertTrue(all(cell.data_type == "s" for cell in message_cells))
+        self.assertTrue(all(cell.quotePrefix for cell in message_cells[1:]))
         self.assertEqual(rows[0][headers["like"]], -5)
         self.assertIsInstance(rows[1][headers["like"]], int)
         self.assertIs(rows[1][headers["is_main"]], True)
@@ -375,6 +465,47 @@ class ReportCenterCoreTests(unittest.TestCase):
         self.assertNotIn("Cookie", exported)
         self.assertNotIn("access_token", exported)
         self.assertNotIn("secret", output.read_text(encoding="utf-8"))
+
+    def test_sensitive_basename_and_nested_values_are_quarantined_without_failing_export(self):
+        secret = "supersecret"
+        source_path = self.root / "Token=supersecret.jsonl"
+        source_path.write_text(json.dumps({
+            "rpid": 1, "ctime": BASE_TS, "message": "bearer",
+            "safe_url": "https://example.com/report?id=123",
+            "nested": {
+                "Authorization": secret,
+                "SendKey": secret,
+                "userinfo_url": "https://user:pass@example.com/report",
+                "query_url": "https://example.com/report?sendkey=secret",
+            },
+        }, ensure_ascii=False) + "\n", encoding="utf-8")
+        source = core.read_source(source_path).source
+        output = core.export_filtered(source, self.root / "reports", "XLSX")
+        workbook = load_workbook(output, data_only=False)
+        try:
+            values = "\n".join(
+                str(cell.value)
+                for sheet in workbook.worksheets
+                for row in sheet.iter_rows()
+                for cell in row
+                if cell.value is not None
+            )
+            comments = "\n".join(
+                str(cell.comment.text)
+                for sheet in workbook.worksheets
+                for row in sheet.iter_rows()
+                for cell in row
+                if cell.comment is not None
+            )
+        finally:
+            workbook.close()
+        with ZipFile(output) as archive:
+            xml = b"\n".join(archive.read(name) for name in archive.namelist())
+        self.assertNotIn(secret, values)
+        self.assertNotIn(secret, comments)
+        self.assertNotIn(secret.encode("utf-8"), xml)
+        self.assertIn("bearer", values)
+        self.assertEqual(list((self.root / "reports").glob("*.tmp")), [])
 
     def test_refresh_export_have_no_network_or_taskrunner_boundary(self):
         source_path = self.write_jsonl("comments.jsonl", [comment_row(1)])

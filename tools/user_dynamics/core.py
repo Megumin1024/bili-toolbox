@@ -25,6 +25,21 @@ from openpyxl.utils import get_column_letter
 from core import wbi, xlsx as xlsx_mod
 from core.budget import BudgetExhaustedError
 from core.cancel import TaskCancelledError, wait as cancel_wait
+from core.xlsx_metadata import (
+    FieldDefinition,
+    QualityItem,
+    make_metadata,
+    primary_key_quality,
+    write_metadata_sheets,
+)
+from core.xlsx_presentation import (
+    TableLayout,
+    append_sheet_directory,
+    configure_table,
+    external_link_cell,
+    finish_table,
+    wrap_cell,
+)
 
 DYNAMIC_FEED_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
 
@@ -179,7 +194,11 @@ class DynamicsCrawler:
         self.out_path = self.out_dir / f"dynamics_{self.uid}.jsonl"
         self.rows = []
         self.stats = {"uid": self.uid, "pages": 0, "requests": 0,
-                      "rows": 0, "truncated": False, "cancelled": False}
+                      "rows": 0, "truncated": False, "cancelled": False,
+                      "candidate_records": 0, "duplicate_rows": 0,
+                      "parse_failures": 0, "invalid_time": 0,
+                      "missing_id": 0, "invalid_id": 0,
+                      "dedup_discarded": 0, "remaining_id_conflicts": 0}
 
     def _p(self, **kw):
         self._progress(**kw)
@@ -267,9 +286,25 @@ class DynamicsCrawler:
                     break
                 new = 0
                 for item in items:
+                    self.stats["candidate_records"] += 1
+                    if not isinstance(item, dict):
+                        self.stats["parse_failures"] += 1
+                        continue
                     row = parse_item(item)
                     if row["id"] and row["id"] in seen:
+                        self.stats["duplicate_rows"] += 1
+                        self.stats["dedup_discarded"] += 1
                         continue
+                    if not row["id"]:
+                        self.stats["parse_failures"] += 1
+                        if item.get("id_str") in (None, ""):
+                            self.stats["missing_id"] += 1
+                        else:
+                            self.stats["invalid_id"] += 1
+                        continue
+                    raw_pub_ts = ((item.get("modules") or {}).get("module_author") or {}).get("pub_ts")
+                    if raw_pub_ts not in (None, "", 0) and not row["pub_ts"]:
+                        self.stats["invalid_time"] += 1
                     if row["id"]:
                         seen.add(row["id"])
                     self.rows.append(row)
@@ -319,6 +354,31 @@ def export_xlsx(rows, uid, stats, path, progress=None):
     """动态明细 → Excel。rows 为空也照样出一份带说明的表。"""
     if progress:
         progress(text="正在生成 Excel…")
+
+    def state(kind, label):
+        return xlsx_mod.cell_value(None, kind, note=label)
+
+    def value(raw, kind, label):
+        if raw is None:
+            return state(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+        return xlsx_mod.checked_cell_value(raw, kind, note=f"{label}格式异常")
+
+    def field(mapping, key, kind, label):
+        if key not in mapping:
+            return state(xlsx_mod.CellKind.NOT_RETURNED, f"{label}未返回")
+        if mapping[key] is None:
+            return state(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+        if kind is xlsx_mod.CellKind.DATETIME:
+            return xlsx_mod.unix_seconds_cell_value(mapping[key], note=f"{label}格式异常")
+        return value(mapping[key], kind, label)
+
+    def url_field(mapping, key, label):
+        if key not in mapping:
+            return state(xlsx_mod.CellKind.NOT_RETURNED, f"{label}未返回")
+        if mapping[key] is None:
+            return state(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+        return external_link_cell(sw, mapping[key])
+
     wb = xlsx_mod.new_workbook()
     sw = xlsx_mod.SheetWriter(wb)
 
@@ -334,28 +394,108 @@ def export_xlsx(rows, uid, stats, path, progress=None):
     else:
         note = "任务被中途取消"
     sw.kv(ws, [
-        ("UID", uid, "数据来自该用户的公开动态"),
-        ("动态条数", len(rows), f"共 {stats.get('pages', 0)} 页"
+        ("UID", value(uid, xlsx_mod.CellKind.ID, "UID"), "数据来自该用户的公开动态"),
+        ("动态条数", value(len(rows), xlsx_mod.CellKind.INTEGER, "动态条数"),
+         f"共 {stats.get('pages', 0)} 页"
                                 f"（每页约 {PAGE_SIZE} 条）"),
-        ("完成情况", note, f"取消={stats.get('cancelled', False)}"),
-        ("抓取时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S"), ""),
+        ("完成情况", value(note, xlsx_mod.CellKind.TEXT, "完成情况"),
+         f"取消={stats.get('cancelled', False)}"),
+        ("抓取时间", value(datetime.now(xlsx_mod.ASIA_SHANGHAI).replace(tzinfo=None),
+                           xlsx_mod.CellKind.DATETIME, "抓取时间"), ""),
     ])
-    ws.append([None, sw.wc("口径：B站动态接口（游客通道 + WBI 签名）。"
+    sw.append([None, sw.wc("口径：B站动态接口（游客通道 + WBI 签名）。"
                            "计数为接口返回的实时口径，非历史定格。",
-                           font=xlsx_mod.F_CAPTION)])
+                            font=xlsx_mod.F_CAPTION)])
+    append_sheet_directory(sw, ws, (
+        ("动态明细", "动态明细"),
+        ("数据质量", "数据质量"),
+        ("字段说明", "字段说明"),
+    ))
 
     ws2 = wb.create_sheet("动态明细")
     sw.ws = ws2
+    detail_layout = TableLayout(3, 2, len(_HEADERS) + 1)
+    configure_table(ws2, detail_layout)
     sw.title_row(ws2, f"UID {uid} 的动态明细", len(_HEADERS))
     sw.header_row(ws2, list(_HEADERS))
     for i, r in enumerate(rows, 1):
-        ws2.append([None,
-                    sw.wc(i), sw.wc(r.get("time")), sw.wc(r.get("type")),
-                    sw.wc(r.get("text")), sw.wc(r.get("forward")),
-                    sw.wc(r.get("comment")), sw.wc(r.get("like")),
-                    sw.wc(r.get("favorite")), sw.wc(r.get("coin")),
-                    sw.wc(r.get("bvid")), sw.wc(r.get("url")), sw.wc(r.get("id"))])
+        if r.get("pub_ts") not in (None, 0):
+            time_cell = field(r, "pub_ts", xlsx_mod.CellKind.DATETIME, "发布时间")
+        elif r.get("time"):
+            # 旧 JSONL 只有本地字符串时不伪造时区或精度，保守保留文本。
+            time_cell = value(r.get("time"), xlsx_mod.CellKind.TEXT, "发布时间")
+        else:
+            time_cell = state(xlsx_mod.CellKind.MISSING, "发布时间缺失")
+        bvid_cell = (field(r, "bvid", xlsx_mod.CellKind.ID, "BV号")
+                     if r.get("bvid") else state(xlsx_mod.CellKind.NOT_APPLICABLE, "BV号不适用"))
+        sw.append([None,
+                   value(i, xlsx_mod.CellKind.INTEGER, "序号"), time_cell,
+                   field(r, "type", xlsx_mod.CellKind.TEXT, "类型"),
+                   wrap_cell(sw, field(r, "text", xlsx_mod.CellKind.TEXT, "正文")),
+                   field(r, "forward", xlsx_mod.CellKind.INTEGER, "转发"),
+                   field(r, "comment", xlsx_mod.CellKind.INTEGER, "评论"),
+                   field(r, "like", xlsx_mod.CellKind.INTEGER, "点赞"),
+                   field(r, "favorite", xlsx_mod.CellKind.INTEGER, "收藏"),
+                   field(r, "coin", xlsx_mod.CellKind.INTEGER, "投币"),
+                   bvid_cell, url_field(r, "url", "链接"),
+                   field(r, "id", xlsx_mod.CellKind.ID, "动态ID")])
     for idx, width in enumerate(_WIDTHS, start=2):
         ws2.column_dimensions[get_column_letter(idx)].width = width
-    wb.save(path)
+    finish_table(ws2, detail_layout, len(rows))
+    def q(item, raw, kind, unit, note, presentation_state=None):
+        if raw is None:
+            value_cell = xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note=note)
+        else:
+            value_cell = xlsx_mod.checked_cell_value(raw, kind, note=note)
+        return QualityItem("动态", item, value_cell, unit, note, presentation_state)
+    quality = [
+        q("候选记录总数", stats.get("candidate_records"), xlsx_mod.CellKind.INTEGER, "条", "接口分页返回的候选 item 数"),
+        q("实际写入动态明细数", len(rows), xlsx_mod.CellKind.INTEGER, "条", "使用真实动态 ID 去重后的有效行"),
+        q("检测到的重复数", stats.get("duplicate_rows"), xlsx_mod.CellKind.INTEGER, "条", "重复动态 ID"),
+        q("解析失败数", stats.get("parse_failures"), xlsx_mod.CellKind.INTEGER, "条", "非对象、缺失动态 ID 或无法归一化的 item"),
+        q("非法时间数量", stats.get("invalid_time"), xlsx_mod.CellKind.INTEGER, "条", "原始 pub_ts 存在但无法解析"),
+        QualityItem("接口", "接口声称数量",
+                    xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_RETURNED,
+                                        note="接口未返回"), "条", "接口未提供全量声明数量"),
+        q("覆盖率", None, xlsx_mod.CellKind.PERCENT, "状态", "不适用：接口未返回声明数量"),
+        q("是否取消", bool(stats.get("cancelled", False)), xlsx_mod.CellKind.BOOLEAN, "状态", "来自结构化 crawler stats", "stop"),
+        q("是否截断", bool(stats.get("truncated", False)), xlsx_mod.CellKind.BOOLEAN, "状态", "页数或空结果边界", "warning"),
+        q("是否预算到限", stats.get("stopped_reason") == "budget_reached", xlsx_mod.CellKind.BOOLEAN, "状态", "来自 stopped_reason", "stop"),
+        q("是否部分成功", bool(rows) and bool(stats.get("truncated") or stats.get("cancelled") or stats.get("stopped_reason")), xlsx_mod.CellKind.BOOLEAN, "状态", "已有有效记录但任务未完整结束", "warning"),
+    ]
+    quality.extend(primary_key_quality(
+        "主键", "动态ID", denominator=stats.get("candidate_records"),
+        missing=stats.get("missing_id"), invalid=stats.get("invalid_id"),
+        duplicates=stats.get("duplicate_rows"),
+        dedup_discarded=stats.get("duplicate_rows"),
+        remaining_conflicts=stats.get("remaining_id_conflicts"),
+        source_note="来自动态 crawler 结构化统计；不扫描动态明细表",
+    ))
+    fields = []
+    for display, stable, dtype, metric in (
+        ("序号", "row_number", "整数", "本次输出顺序"), ("发布时间", "pub_ts", "日期时间", "Unix 秒转换为 Asia/Shanghai"),
+        ("类型", "type", "文本", "类型枚举映射"), ("正文", "text", "文本", "用户来源文本"),
+        ("转发", "forward", "整数", "接口返回计数"), ("评论", "comment", "整数", "接口返回计数"),
+        ("点赞", "like", "整数", "接口返回计数"), ("收藏", "favorite", "整数", "接口返回计数"),
+        ("投币", "coin", "整数", "接口返回计数"), ("BV号", "bvid", "ID", "投稿动态关联 BV"),
+        ("链接", "url", "文本", "接口跳转链接"), ("动态ID", "id", "ID", "真实动态唯一 ID"),
+    ):
+        fields.append(FieldDefinition("动态明细", display, stable, dtype, "", "是", "动态接口/本地归一化", metric,
+                                      xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "上游已归一化，无法区分"))
+    for display, stable, dtype, metric in (
+        ("UID", "uid", "ID", "任务目标 UID"),
+        ("动态条数", "dynamic_count", "整数", "有效动态 ID 去重后的输出数"),
+        ("完成情况", "completion", "文本", "crawler 终态说明"),
+        ("抓取时间", "captured_at", "日期时间", "本地导出时间"),
+    ):
+        fields.append(FieldDefinition("概览", display, stable, dtype, "", "是", "动态接口/本地归一化", metric,
+                                      xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "接口未返回或不适用"))
+    metadata = make_metadata(
+        tool="用户动态", report_type="用户动态导出", parameters={
+            "UID": xlsx_mod.cell_value(uid, xlsx_mod.CellKind.ID),
+            "页数": xlsx_mod.checked_cell_value(stats.get("pages", 0), xlsx_mod.CellKind.INTEGER),
+            "请求数": xlsx_mod.checked_cell_value(stats.get("requests", 0), xlsx_mod.CellKind.INTEGER),
+        }, parameter_allowlist=("UID", "页数", "请求数"), quality_items=quality, fields=fields)
+    write_metadata_sheets(wb, metadata)
+    xlsx_mod.save_workbook_atomic(wb, path)
     return path

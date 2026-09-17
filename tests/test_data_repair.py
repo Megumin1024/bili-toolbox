@@ -317,7 +317,8 @@ class DataRepairTests(unittest.TestCase):
         path = self.write_jsonl("privacy.jsonl", [comment(1, secret), comment(1, "other")])
         result = self.run_repair([path])
         workbook = load_workbook(result["manifest"], read_only=True, data_only=True)
-        self.assertEqual(workbook.sheetnames, ["修复概览", "文件汇总", "修复明细"])
+        self.assertEqual(workbook.sheetnames,
+                         ["修复概览", "文件汇总", "修复明细", "数据质量", "字段说明"])
         overview = {row[0]: row[1] for row in
                     workbook["修复概览"].iter_rows(min_row=2, values_only=True)}
         workbook.close()

@@ -7,6 +7,7 @@ core.session 风控栈，支持快照断点续传与 -352 人工恢复后续采�
 import json
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 from core import links, risk, session
@@ -23,6 +24,30 @@ def _file_size(path):
         return path.stat().st_size
     except FileNotFoundError:
         return 0
+
+
+def _snapshot_key_stats(records):
+    """只基于流水线已有的结构化快照，生成 bvid 质量统计。"""
+    missing = invalid = 0
+    keys = []
+    for record in records:
+        if not isinstance(record, dict) or "bvid" not in record or record.get("bvid") in (None, ""):
+            missing += 1
+            continue
+        bvid = record.get("bvid")
+        if not isinstance(bvid, str) or not bvid.strip():
+            invalid += 1
+            continue
+        keys.append(bvid.strip())
+    duplicates = sum(count - 1 for count in Counter(keys).values() if count > 1)
+    return {
+        "candidate_records": len(records),
+        "missing": missing,
+        "invalid": invalid,
+        "duplicates": duplicates,
+        "dedup_discarded": 0,
+        "remaining_conflicts": duplicates,
+    }
 
 
 def _read_jsonl_since(path, offset):
@@ -221,10 +246,19 @@ def run_pipeline(sources, out_dir, sleep=0.3, monitor=False, interval_min=60,
         snaps = [v[-1] for v in by_bvid.values() if v]
         growth = core.analyze_growth(by_bvid)
 
+        cancelled_now = bool(cancel and cancel())
+        budget_reached_now = bool(budget_stop_round)
+        final_round = not monitor or (rounds and rnd >= rounds)
         meta = {"title": f"{len(bvids)} 个视频", "source": "; ".join(sources)[:120],
-                "ok": len(round_success), "attempted": len(bvids),
+                "source_count": len(sources), "ok": len(round_success),
+                "failed": len(round_failed), "attempted": len(bvids),
                 "monitor": "是" if monitor else "否",
-                "rounds": rnd, "interval_min": interval_min}
+                "rounds": rnd, "interval_min": interval_min,
+                "round_incomplete": not round_complete,
+                "terminal_known": bool(cancelled_now or budget_reached_now or final_round),
+                "cancelled": cancelled_now,
+                "stopped_reason": "budget_reached" if budget_reached_now else None,
+                "key_stats": _snapshot_key_stats(snaps)}
         xlsx_path = out / f"视频数据报告_{rnd}轮.xlsx"
         if monitor and rounds and rnd < rounds:
             xlsx_path = out / f"视频数据报告_第{rnd}轮.xlsx"

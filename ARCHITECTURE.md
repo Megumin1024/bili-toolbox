@@ -27,7 +27,9 @@ core/                                    ← 不允许 import app/ 或 tools/
   │              risk.py / redact.py
   ├─ 配置与状态：config.py / task_history.py / task_presets.py
   ├─ 推送与领域：notify.py / live.py
-  └─ 输出与文本：output.py / xlsx.py / text.py / links.py / diagnostics.py
+  └─ 输出与文本：output.py / xlsx.py / xlsx_metadata.py /
+                 xlsx_presentation.py / text.py /
+                 links.py / diagnostics.py
 ```
 
 ## 依赖方向

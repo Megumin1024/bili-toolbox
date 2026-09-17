@@ -13,7 +13,10 @@ import shutil
 import tempfile
 import unittest
 from datetime import datetime
+from pathlib import Path
 from unittest import mock
+
+from openpyxl import load_workbook
 
 from core import wbi
 from tools.user_dynamics import core
@@ -229,6 +232,36 @@ class ParsePageTests(unittest.TestCase):
 
     def test_items_wrong_type_is_treated_as_empty(self):
         self.assertEqual(core.parse_page({"data": {"items": "oops"}})[0], [])
+
+
+class ExportTests(unittest.TestCase):
+    def test_xlsx_cells_keep_id_integer_datetime_and_text_contracts(self):
+        row = core.parse_item(make_archive_item(title="=1+1"))
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "dynamics.xlsx"
+            core.export_xlsx([row], 12345,
+                             {"pages": 1, "cancelled": False}, path)
+            workbook = load_workbook(path, data_only=False)
+            detail = workbook["动态明细"][4]
+            detail_sheet = workbook["动态明细"]
+            self.assertEqual(detail_sheet.freeze_panes, "A4")
+            self.assertEqual(detail_sheet.auto_filter.ref, "B3:M4")
+            self.assertIsInstance(detail[1].value, int)
+            self.assertEqual(detail[1].number_format, "#,##0")
+            self.assertIsInstance(detail[2].value, datetime)
+            self.assertEqual(detail[2].number_format, "yyyy-mm-dd hh:mm:ss")
+            self.assertEqual(detail[4].value, "=1+1")
+            self.assertEqual(detail[4].data_type, "s")
+            self.assertTrue(detail[4].quotePrefix)
+            self.assertEqual(detail[10].data_type, "s")
+            self.assertEqual(detail[10].number_format, "@")
+            self.assertEqual(detail[12].data_type, "s")
+            self.assertEqual(detail[12].number_format, "@")
+            self.assertTrue(detail[4].alignment.wrap_text)
+            self.assertIsNotNone(detail[11].hyperlink)
+            self.assertEqual(detail[11].hyperlink.target,
+                             "https://www.bilibili.com/video/BV1xx411c7mD")
+            workbook.close()
 
 
 class CrawlerTests(unittest.TestCase):

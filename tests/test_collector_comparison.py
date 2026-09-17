@@ -5,6 +5,7 @@ import json
 import os
 import tempfile
 import unittest
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -12,6 +13,7 @@ from unittest.mock import Mock, patch
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from core.risk import RiskChallengeError
+from tools.collector import core as collector_core
 from tools.collector import pipeline as collector_pipeline
 from tools.collector.comparison import SessionComparison, numeric_value, sort_rows
 
@@ -264,6 +266,19 @@ class ComparisonAggregationTests(unittest.TestCase):
                          ["BV1", "BV2", "BV3"])
 
 
+class SnapshotAnalysisTests(unittest.TestCase):
+    def test_invalid_pubdate_does_not_block_valid_year_statistics(self):
+        invalid = snapshot("BV-invalid", view=1, like=0)
+        invalid["pubdate"] = "9" * 5000
+        valid = snapshot("BV-valid", view=2, like=1)
+
+        result = collector_core.analyze_snapshot([invalid, valid])
+
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(result["total_view"], 3)
+        self.assertEqual(result["years"], [("2020", 1)])
+
+
 class PipelineRoundBoundaryTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -441,11 +456,26 @@ class PipelineRoundBoundaryTests(unittest.TestCase):
         snapshot_lines = [json.loads(line) for line in (self.root / "snapshots.jsonl").read_text(encoding="utf-8").splitlines()]
         self.assertEqual(set(snapshot_lines[0]), set(snapshot("BV1")))
         from openpyxl import load_workbook
-        workbook = load_workbook(result["xlsx"], read_only=True, data_only=True)
-        self.assertEqual(workbook.sheetnames, ["采集概览", "视频总表", "增速榜"])
+        workbook = load_workbook(result["xlsx"], read_only=False, data_only=False)
+        self.assertEqual(workbook.sheetnames,
+                         ["采集概览", "视频总表", "增速榜", "数据质量", "字段说明"])
         headers = [cell.value for cell in next(workbook["视频总表"].iter_rows(min_row=1, max_row=1))]
         self.assertEqual(headers[1:], ["排名", "BV号", "标题", "UP主", "分区", "时长(秒)", "发布时间",
                                        "播放", "弹幕", "评论", "点赞", "投币", "收藏", "分享"])
+        detail_row = next(workbook["视频总表"].iter_rows(min_row=2, max_row=2))
+        video_sheet = workbook["视频总表"]
+        self.assertEqual(video_sheet.freeze_panes, "A2")
+        self.assertEqual(video_sheet.auto_filter.ref,
+                         f"B1:O{len(snapshot_lines) + 1}")
+        self.assertEqual(detail_row[2].data_type, "s")
+        self.assertEqual(detail_row[2].number_format, "@")
+        self.assertIsInstance(detail_row[7].value, datetime)
+        self.assertEqual(detail_row[7].number_format, "yyyy-mm-dd hh:mm:ss")
+        self.assertIsInstance(detail_row[8].value, int)
+        self.assertEqual(detail_row[8].number_format, "#,##0")
+        self.assertEqual(detail_row[6].number_format, '#,##0" 秒"')
+        self.assertTrue(detail_row[3].alignment.wrap_text)
+        self.assertEqual(video_sheet._charts, [])
         workbook.close()
 
 

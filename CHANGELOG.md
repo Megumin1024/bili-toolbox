@@ -7,6 +7,20 @@
 
 暂无已发布版本之外的变更。
 
+## [1.0.6] - 2026-09-17
+
+### 新增
+
+- **Excel 数据说明**：导出的 Excel 报告新增“数据质量”和“字段说明”工作表，明确数据来源、字段含义以及缺失、未返回和不适用状态。
+- **表格导航优化**：多种 Excel 报告增加冻结表头、筛选、工作表目录和长文本换行，查看与筛选数据更方便。
+
+### 修复
+
+- **Excel 数据类型与精度**：UID、BV 号、弹幕 ID 等标识不再经过浮点数转换；日期、数字、百分比和布尔值保留为可筛选的 Excel 类型。
+- **Excel 安全导出**：用户文本、外部链接和敏感字段经过安全处理；写入失败时不会覆盖原有结果文件。
+- **评论与弹幕导出边界**：修复 0 行、缺失值、异常大会员状态、日期和声明数量等场景的导出问题。
+- **本地报告与采集工具**：补齐质量统计和字段说明，减少把缺失数据误报为 0 的情况。
+
 ## [1.0.5] - 2026-09-13
 
 ### 修复
@@ -126,7 +140,8 @@
 
 - 单一 PyInstaller 配置（onedir，约 45MB）
 
-[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.5...HEAD
+[Unreleased]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.6...HEAD
+[1.0.6]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/Megumin1024/bili-toolbox/compare/v1.0.2...v1.0.3

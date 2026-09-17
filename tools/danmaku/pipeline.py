@@ -197,11 +197,14 @@ def run_pipeline(target, out_dir, max_segments=core.DEFAULT_MAX_SEGMENTS,
     # 其余路径 targets 恒非空、parts 也随之非空。
     multi = len(parts) > 1
     stats = _merge_stats(parts)
+    stats["max_segments"] = max_segments
     stats["cancelled"] = stats["cancelled"] or cancelled
     if budget_stop:
         stats["stopped_reason"] = "budget_reached"
     if (not rows and not stats["cancelled"]
             and not stats.get("stopped_reason")
+            and isinstance(meta.get("claimed_danmaku"), (int, float))
+            and not isinstance(meta.get("claimed_danmaku"), bool)
             and meta["claimed_danmaku"] > 0):
         # 一条没抓到而视频自称有弹幕：按现有「无弹幕」语义报错收场。全部超界
         # 是唯一换说法的情形——"通常是被限流降级"会误导用户去重试一个写错的
@@ -313,6 +316,11 @@ def _merge_stats(parts):
     merged = {
         "segments": sum(p["segments"] for p in parts),
         "duplicates": sum(p["duplicates"] for p in parts),
+        "candidate_records": sum(p.get("candidate_records", 0) for p in parts),
+        "missing_id": sum(p.get("missing_id", 0) for p in parts),
+        "invalid_id": sum(p.get("invalid_id", 0) for p in parts),
+        "dedup_discarded": sum(p.get("dedup_discarded", p.get("duplicates", 0)) for p in parts),
+        "remaining_conflicts": sum(p.get("remaining_conflicts", 0) for p in parts),
         "cancelled": any(p["cancelled"] for p in parts),
         "truncated": any(p["truncated"] for p in parts),
         "expected_segments": (sum(e for e in expects if e is not None)

@@ -33,6 +33,21 @@ from pathlib import Path
 from openpyxl.utils import get_column_letter
 
 from core import xlsx as xlsx_mod
+from core.xlsx_metadata import (
+    FieldDefinition,
+    QualityItem,
+    classify_declared_count,
+    make_metadata,
+    primary_key_quality,
+    write_metadata_sheets,
+)
+from core.xlsx_presentation import (
+    TableLayout,
+    append_sheet_directory,
+    configure_table,
+    finish_table,
+    wrap_cell,
+)
 from core.budget import BudgetExhaustedError
 from core.cancel import TaskCancelledError, wait as cancel_wait
 
@@ -122,6 +137,16 @@ def fetch_video_meta(bvid=None, aid=None, page=1, cancel=None, budget=None):
         cid, duration, part = d.get("cid"), d.get("duration") or 0, ""
     if not cid:
         raise ValueError("视频信息里没有 cid，无法定位弹幕")
+    stat = d.get("stat") or {}
+    claimed_danmaku = stat.get("danmaku") if "danmaku" in stat else None
+    declared_status, _declared_value = classify_declared_count(
+        claimed_danmaku, present="danmaku" in stat,
+    )
+    if declared_status == "invalid":
+        # pipeline.py 有一条历史的“空结果且接口声称有弹幕”失败保护，
+        # 只认 int/float。先在元信息边界把已确认非法值降为格式异常载荷，
+        # 让本次任务继续生成 XLSX，而不把非法声明伪装成未返回。
+        claimed_danmaku = str(claimed_danmaku)
     return {
         "bvid": d.get("bvid") or (bvid or ""),
         "aid": d.get("aid") or aid,
@@ -135,7 +160,7 @@ def fetch_video_meta(bvid=None, aid=None, page=1, cancel=None, budget=None):
         "pubdate": d.get("pubdate"),
         # 接口自称的弹幕数。口径未经证实（可能含各种池/各分P），仅用于
         # "一条都没抓到却自称有弹幕"这一个判断，不参与对账。
-        "claimed_danmaku": ((d.get("stat") or {}).get("danmaku") or 0),
+        "claimed_danmaku": claimed_danmaku,
     }
 
 
@@ -254,8 +279,10 @@ class DanmakuCrawler:
         self.out_path = self.out_dir / f"danmaku_{name or self.cid}.jsonl"
         self.rows = []
         self.stats = {"cid": self.cid, "segments": 0, "requests": 0, "rows": 0,
+                      "candidate_records": 0, "missing_id": 0, "invalid_id": 0,
                       "expected_segments": expected_segments(self.duration),
-                      "duplicates": 0, "truncated": False, "cancelled": False}
+                      "duplicates": 0, "truncated": False, "cancelled": False,
+                      "max_segments": self.max_segments}
 
     def _p(self, **kw):
         self._progress(**kw)
@@ -323,12 +350,18 @@ class DanmakuCrawler:
                                      f"{expect} 段），可能被提前截断")
                     break
                 elems = parse_segment(raw)
+                self.stats["candidate_records"] += len(elems)
                 new = 0
                 for row in elems:
-                    if row["id"] in seen:
+                    if row.get("id") in (None, ""):
+                        self.stats["missing_id"] += 1
+                        continue
+                    dedup_key = (self.page, row["id"])
+                    if dedup_key in seen:
                         self.stats["duplicates"] += 1
                         continue
-                    seen.add(row["id"])
+                    row["page"] = self.page
+                    seen.add(dedup_key)
                     # 分P信息在这里盖戳：parse_segment 保持纯粹（只认字节），
                     # 而"这条弹幕属于哪个分P"是抓取上下文才知道的事。
                     row["page"] = self.page
@@ -365,6 +398,8 @@ class DanmakuCrawler:
             self._p(level="warn",
                     text=f"已达预算上限，安全停止，保留已抓到的 "
                          f"{len(self.rows):,} 条弹幕")
+        self.stats["dedup_discarded"] = self.stats.get("duplicates", 0)
+        self.stats["remaining_conflicts"] = 0
         return self.stats
 
     def _pace(self, seconds):
@@ -421,6 +456,33 @@ def _pct_cell(value):
     return f"{value:.1f}%" if isinstance(value, (int, float)) else _DASH
 
 
+def _state_cell(kind, label):
+    return xlsx_mod.cell_value(None, kind, note=label)
+
+
+def _typed_cell(value, kind, label, number_format=None):
+    if value is None:
+        return _state_cell(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+    return xlsx_mod.checked_cell_value(value, kind, number_format=number_format,
+                                       note=f"{label}格式异常")
+
+
+def _field_cell(mapping, key, kind, label):
+    if key not in mapping:
+        return _state_cell(xlsx_mod.CellKind.NOT_RETURNED, f"{label}未返回")
+    if mapping[key] is None:
+        return _state_cell(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+    if kind is xlsx_mod.CellKind.DATETIME:
+        return xlsx_mod.unix_seconds_cell_value(mapping[key], note=f"{label}格式异常")
+    return _typed_cell(mapping[key], kind, label)
+
+
+def _percent_cell(value, label):
+    if value is None or isinstance(value, bool) or not isinstance(value, (int, float)):
+        return _state_cell(xlsx_mod.CellKind.MISSING, f"{label}缺失")
+    return _typed_cell(value / 100, xlsx_mod.CellKind.PERCENT, label)
+
+
 def _users_value(analysis):
     if analysis.get("users") is None:
         return _DASH
@@ -437,18 +499,24 @@ def _write_analysis_sheet(wb, sw, label, analysis, multi):
     sw.ws = ws
     sw.title_row(ws, f"{label} 弹幕分析（纯本地统计，无网络请求）", 5)
     kpi = analysis.get("kpi") or {}
-    total = int(analysis.get("total") or 0)
+    total = analysis.get("total")
 
     sw.kv(ws, [
-        ("弹幕条数", f"{total:,}", "本次抓到的全部弹幕"),
-        ("独立发送者", _users_value(analysis),
+        ("弹幕条数", _typed_cell(total, xlsx_mod.CellKind.INTEGER, "弹幕条数"),
+         "本次抓到的全部弹幕"),
+        ("独立发送者", _typed_cell(analysis.get("users"), xlsx_mod.CellKind.INTEGER,
+                                  "独立发送者"),
          analysis.get("users_note") or "按 mid_hash 去重，同一用户在同一视频下哈希稳定"),
-        ("Top10 发送者占比", _pct_cell(analysis.get("top10_user_pct")),
+        ("Top10 发送者占比", _percent_cell(analysis.get("top10_user_pct"),
+                                          "Top10发送者占比"),
          "发得最多的 10 个账号占全部弹幕的比例；越高越集中在少数人手里"),
-        ("平均每条字数", f"{kpi.get('avg_len', 0.0):.1f}", "含表情标记，不去重"),
-        ("非白弹幕", f"{int(kpi.get('colored') or 0):,}",
+        ("平均每条字数", _typed_cell(kpi.get("avg_len"), xlsx_mod.CellKind.DECIMAL,
+                                    "平均每条字数"), "含表情标记，不去重"),
+        ("非白弹幕", _typed_cell(kpi.get("colored"), xlsx_mod.CellKind.INTEGER,
+                                "非白弹幕"),
          f"颜色不是默认白色的弹幕，占 {_pct_cell(kpi.get('colored_pct'))}"),
-        ("发送时间跨度", f"{kpi.get('span_hours', 0.0):.1f} 小时",
+        ("发送时间跨度", _typed_cell(kpi.get("span_hours"), xlsx_mod.CellKind.DECIMAL,
+                                     "发送时间跨度", '0.0" 小时"'),
          f"{kpi.get('first_sent') or _DASH} ~ {kpi.get('last_sent') or _DASH}；"
          "跨度大说明是长尾视频，不是首播当晚刷完的"),
     ])
@@ -459,11 +527,12 @@ def _write_analysis_sheet(wb, sw, label, analysis, multi):
                    + [("池 · " + k, v, p) for k, v, p in kpi.get("pools") or []])
     if composition:
         for name, count, pct in composition:
-            ws.append([None, sw.wc(name), sw.wc(f"{count:,}"),
-                       sw.wc(f"{pct:.1f}%")])
+            sw.append([None, _typed_cell(name, xlsx_mod.CellKind.TEXT, "类别"),
+                       _typed_cell(count, xlsx_mod.CellKind.INTEGER, "条数"),
+                       _percent_cell(pct, "占比")])
     else:
-        ws.append([None, sw.wc("无弹幕，没有构成数据。", font=xlsx_mod.F_CAPTION)])
-    ws.append([None])
+        sw.append([None, sw.wc("无弹幕，没有构成数据。", font=xlsx_mod.F_CAPTION)])
+    sw.append([None])
 
     # ---- 高频弹幕 + 热词（并排，省一半行数） ----
     sw.header_row(ws, ["高频弹幕", "次数", "占比", "热词", "出现在几条弹幕"])
@@ -474,20 +543,26 @@ def _write_analysis_sheet(wb, sw, label, analysis, multi):
             cells = []
             if i < len(top_danmaku):
                 content, count, pct = top_danmaku[i]
-                cells += [sw.wc(content), sw.wc(f"{count:,}"), sw.wc(f"{pct:.1f}%")]
+                cells += [_typed_cell(content, xlsx_mod.CellKind.TEXT, "高频弹幕"),
+                           _typed_cell(count, xlsx_mod.CellKind.INTEGER, "次数"),
+                           _percent_cell(pct, "占比")]
             else:
-                cells += [sw.wc(""), sw.wc(""), sw.wc("")]
+                cells += [_typed_cell("", xlsx_mod.CellKind.TEXT, "高频弹幕"),
+                           _typed_cell("", xlsx_mod.CellKind.TEXT, "次数"),
+                           _typed_cell("", xlsx_mod.CellKind.TEXT, "占比")]
             if i < len(top_words):
                 word, count = top_words[i]
-                cells += [sw.wc(word), sw.wc(f"{count:,}")]
+                cells += [_typed_cell(word, xlsx_mod.CellKind.TEXT, "热词"),
+                           _typed_cell(count, xlsx_mod.CellKind.INTEGER, "出现在几条弹幕")]
             else:
-                cells += [sw.wc(""), sw.wc("")]
-            ws.append([None] + cells)
+                cells += [_typed_cell("", xlsx_mod.CellKind.TEXT, "热词"),
+                           _typed_cell("", xlsx_mod.CellKind.TEXT, "出现在几条弹幕")]
+            sw.append([None] + cells)
     else:
-        ws.append([None, sw.wc(
+        sw.append([None, sw.wc(
             f"样本太少：没有出现达到 {analysis.get('high_freq_min_count')} 次的"
             "重复弹幕，也没有达到门槛的高频用词。", font=xlsx_mod.F_CAPTION)])
-    ws.append([None])
+    sw.append([None])
 
     # ---- 热点分钟 ----
     headers = (["分P", "分钟区间", "条数", "占比", "该分钟刷得最多"] if multi
@@ -498,17 +573,19 @@ def _write_analysis_sheet(wb, sw, label, analysis, multi):
         for m in hot:
             cells = []
             if multi:
-                cells.append(sw.wc(f"P{m.get('page')}"))
-            cells += [sw.wc(m.get("time")), sw.wc(f"{m.get('count', 0):,}"),
-                      sw.wc(f"{m.get('pct', 0.0):.1f}%"),
-                      sw.wc("；".join(m.get("examples") or [])
-                            or "（该分钟没有重复内容）")]
-            ws.append([None] + cells)
+                cells.append(_typed_cell(f"P{m.get('page')}", xlsx_mod.CellKind.TEXT, "分P"))
+            cells += [_typed_cell(m.get("time"), xlsx_mod.CellKind.TEXT, "分钟区间"),
+                      _typed_cell(m.get("count"), xlsx_mod.CellKind.INTEGER, "条数"),
+                      _percent_cell(m.get("pct"), "占比"),
+                      _typed_cell("；".join(m.get("examples") or [])
+                                  or "（该分钟没有重复内容）",
+                                  xlsx_mod.CellKind.TEXT, "该分钟刷得最多")]
+            sw.append([None] + cells)
     else:
-        ws.append([None, sw.wc("没有弹幕，无法给出热点分钟。",
+        sw.append([None, sw.wc("没有弹幕，无法给出热点分钟。",
                                font=xlsx_mod.F_CAPTION)])
-    ws.append([None])
-    ws.append([None, sw.wc(
+    sw.append([None])
+    sw.append([None, sw.wc(
         "口径：纯本地统计，不产生任何网络请求。高频弹幕与热词"
         + ("跨全部分P合并统计" if multi else "按单分P统计")
         + "；热点分钟按 (分P, 分钟) 分开，各分P都从 00:00 重新计时。"
@@ -532,6 +609,32 @@ def export_xlsx(rows, meta, stats, path, progress=None, parts=None, sleep=None,
     """
     if progress:
         progress(text="正在生成 Excel…")
+
+    def state(kind, label_text):
+        return _state_cell(kind, label_text)
+
+    def value(raw, kind, label_text, number_format=None):
+        return _typed_cell(raw, kind, label_text, number_format)
+
+    def field(mapping, key, kind, label_text):
+        return _field_cell(mapping, key, kind, label_text)
+
+    def safe_metric(raw):
+        return raw if isinstance(raw, (int, float)) and not isinstance(raw, bool) else 0
+
+    declared_status, declared_value = classify_declared_count(
+        meta.get("claimed_danmaku"),
+        present="claimed_danmaku" in meta,
+    )
+    if declared_status == "not_returned":
+        claimed_overview_cell = state(xlsx_mod.CellKind.NOT_RETURNED, "接口未返回")
+    elif declared_status == "invalid":
+        claimed_overview_cell = state(xlsx_mod.CellKind.MISSING, "声明数量格式异常")
+    else:
+        claimed_overview_cell = xlsx_mod.checked_cell_value(
+            declared_value, xlsx_mod.CellKind.INTEGER, note="声明数量格式异常"
+        )
+
     wb = xlsx_mod.new_workbook()
     sw = xlsx_mod.SheetWriter(wb)
     expect = stats.get("expected_segments")
@@ -548,33 +651,36 @@ def export_xlsx(rows, meta, stats, path, progress=None, parts=None, sleep=None,
     part_note = ("各分P分别统计" if multi
                  else (meta.get("part") or "") if meta.get("page_count", 1) > 1
                  else "单分P视频")
-    # 多分P时概览说合计口径：时长求和，否则只会显示 P1 的时长，容易被误读成
-    # "整个视频就这么长"。
     if multi:
-        duration_s = sum(int(p.get("duration") or 0) for p in parts)
+        duration_s = sum(int(p["duration"]) for p in parts
+                         if isinstance(p.get("duration"), (int, float))
+                         and not isinstance(p.get("duration"), bool))
     else:
-        duration_s = meta.get("duration", 0)
+        duration_s = meta.get("duration")
+    duration_s = safe_metric(duration_s)
     sw.kv(ws, [
-        ("视频标题", meta.get("title") or "", f"UP主：{meta.get('owner') or '未知'}"),
-        ("BV号 / av号", f"{meta.get('bvid') or '-'} / av{meta.get('aid')}",
+        ("视频标题", value(meta.get("title") or "", xlsx_mod.CellKind.TEXT, "视频标题"),
+         f"UP主：{meta.get('owner') or '未知'}"),
+        ("BV号 / av号", value(f"{meta.get('bvid') or '-'} / av{meta.get('aid')}",
+                              xlsx_mod.CellKind.TEXT, "视频ID"),
          f"cid={meta.get('cid')}（弹幕挂在 cid 上，不是 aid）"),
-        ("分P", part_cell, part_note),
-        ("视频时长", hhmmss(duration_s * 1000),
+        ("分P", value(part_cell, xlsx_mod.CellKind.TEXT, "分P"), part_note),
+        ("视频时长", value(hhmmss(duration_s * 1000), xlsx_mod.CellKind.TEXT, "视频时长"),
          f"共 {duration_s} 秒"
-         + (f"（{len(parts)} 个分P 之和，各分P独立计时）" if multi
-            else "")),
-        ("弹幕条数", f"{len(rows):,}",
+         + (f"（{len(parts)} 个分P之和，各分P独立计时）" if multi else "")),
+        ("弹幕条数", value(len(rows), xlsx_mod.CellKind.INTEGER, "弹幕条数"),
          f"来自 {stats.get('segments', 0)} 段（每段 {step} 分钟）"
          + (f"，预计 {expect} 段" if expect else "")),
-        ("完成情况", _completion_note(stats, expect, rows),
+        ("完成情况", value(_completion_note(stats, expect, rows), xlsx_mod.CellKind.TEXT, "完成情况"),
          f"取消={stats.get('cancelled', False)} 截断={stats.get('truncated', False)}"
          f" 去重={stats.get('duplicates', 0)}"),
-        ("接口自称弹幕数", f"{meta.get('claimed_danmaku', 0):,}",
+        ("接口自称弹幕数", claimed_overview_cell,
          "视频接口的计数，口径未经证实（可能含各池/各分P），仅供参考不对账"),
-        ("抓取时间", datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        ("抓取时间", value(datetime.now(xlsx_mod.ASIA_SHANGHAI).replace(tzinfo=None),
+                           xlsx_mod.CellKind.DATETIME, "抓取时间"),
          f"段间隔 {DEFAULT_SLEEP if sleep is None else sleep}s"),
     ])
-    ws.append([None, sw.wc(
+    sw.append([None, sw.wc(
         "口径：B站弹幕分段接口（游客通道，二进制 protobuf，无需登录、无需签名）。"
         "「视频内时间」为该弹幕在第几秒出现，与视频进度条对应；"
         "明细表已按视频内时间排序（接口原始顺序是发送顺序，见同目录 jsonl）。"
@@ -582,8 +688,19 @@ def export_xlsx(rows, meta, stats, path, progress=None, parts=None, sleep=None,
            if multi else ""),
         font=xlsx_mod.F_CAPTION)])
 
-    # ---- 弹幕分析（纯本地统计） ----
-    # 放在概览之后、明细之前：它跟概览一样是"结论层"，明细与密度是"数据层"。
+    directory_entries = []
+    if analysis:
+        directory_entries.append(("弹幕分析", "弹幕分析"))
+    if multi:
+        directory_entries.append(("分P汇总", "分P汇总"))
+    directory_entries.extend((
+        ("弹幕明细", "弹幕明细"),
+        ("密度分布", "密度分布"),
+        ("数据质量", "数据质量"),
+        ("字段说明", "字段说明"),
+    ))
+    append_sheet_directory(sw, ws, directory_entries)
+
     if analysis:
         _write_analysis_sheet(wb, sw, label, analysis, multi)
 
@@ -591,87 +708,226 @@ def export_xlsx(rows, meta, stats, path, progress=None, parts=None, sleep=None,
     if multi:
         ws0 = wb.create_sheet("分P汇总")
         sw.ws = ws0
+        parts_layout = TableLayout(3, 2, 7)
+        configure_table(ws0, parts_layout)
         sw.title_row(ws0, f"{label} 各分P小结", 6)
         sw.header_row(ws0, ["分P", "标题", "时长", "弹幕条数", "段数", "完成情况"])
         for p in parts:
             pexp = p.get("expected_segments")
-            ws0.append([None, sw.wc(part_label(p.get("page"), p.get("part"))),
-                        sw.wc(p.get("part") or ""),
-                        sw.wc(hhmmss(p.get("duration", 0) * 1000)),
-                        sw.wc(p.get("rows", 0)), sw.wc(p.get("segments", 0)),
-                        sw.wc(_completion_note(p, pexp, p.get("rows", 0)))])
+            sw.append([None, value(part_label(p.get("page"), p.get("part")),
+                                   xlsx_mod.CellKind.TEXT, "分P"),
+                        wrap_cell(sw, value(p.get("part") or "", xlsx_mod.CellKind.TEXT, "标题")),
+                       value(hhmmss(safe_metric(p.get("duration")) * 1000),
+                             xlsx_mod.CellKind.TEXT, "时长"),
+                       value(p.get("rows"), xlsx_mod.CellKind.INTEGER, "弹幕条数"),
+                       value(p.get("segments"), xlsx_mod.CellKind.INTEGER, "段数"),
+                        value(_completion_note(p, pexp, p.get("rows") or 0),
+                              xlsx_mod.CellKind.TEXT, "完成情况")])
+        finish_table(ws0, parts_layout, len(parts))
         for idx, width in enumerate((18, 26, 12, 12, 8, 40), start=2):
             ws0.column_dimensions[get_column_letter(idx)].width = width
-        # 合计只占一行：拆成两行（标签一行、数字一行）在 Excel 里看着像两组数据。
-        ws0.append([None] + [sw.wc(v, font=xlsx_mod.F_HEADER,
-                                   fill=xlsx_mod.FILL_HEADER) for v in (
-            "合计", "", hhmmss(sum(int(p.get("duration") or 0)
-                                   for p in parts) * 1000),
-            len(rows), stats.get("segments", 0), "")])
+        total_duration = sum(int(p["duration"]) for p in parts
+                             if isinstance(p.get("duration"), (int, float))
+                             and not isinstance(p.get("duration"), bool))
+        sw.append([None, sw.wc("合计", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER),
+                   sw.wc("", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER),
+                   sw.wc(hhmmss(total_duration * 1000), font=xlsx_mod.F_HEADER,
+                         fill=xlsx_mod.FILL_HEADER),
+                   sw.wc(len(rows), font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER,
+                         kind=xlsx_mod.CellKind.INTEGER),
+                   sw.wc(stats.get("segments", 0), font=xlsx_mod.F_HEADER,
+                         fill=xlsx_mod.FILL_HEADER, kind=xlsx_mod.CellKind.INTEGER),
+                   sw.wc("", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER)])
 
     # ---- 弹幕明细 ----
-    # 按视频内时间排序：接口是按弹幕 ID（近似发送顺序）下发的，直接导出的话时间
-    # 轴是散的，看不出哪句话出现在哪一段。只影响这张表——jsonl 保留原始顺序。
-    ordered = sorted(rows, key=lambda r: (int(r.get("page") or 1),
-                                          r.get("progress_ms") or 0,
-                                          str(r.get("id") or "")))
+    def sort_page(row):
+        return row.get("page") if isinstance(row.get("page"), int) else 1
+
+    def sort_progress(row):
+        return row.get("progress_ms") if isinstance(row.get("progress_ms"), int) else 0
+
+    ordered = sorted(rows, key=lambda r: (sort_page(r), sort_progress(r), str(r.get("id") or "")))
     headers = _PART_HEADERS if multi else _DETAIL_HEADERS
     widths = _PART_WIDTHS if multi else _DETAIL_WIDTHS
     ws2 = wb.create_sheet("弹幕明细")
     sw.ws = ws2
+    detail_layout = TableLayout(3, 2, len(headers) + 1)
+    configure_table(ws2, detail_layout)
     sw.title_row(ws2, f"{label} 弹幕明细", len(headers))
     sw.header_row(ws2, list(headers))
     for i, r in enumerate(ordered, 1):
-        cells = [sw.wc(i)]
+        sent_cell = (field(r, "ctime", xlsx_mod.CellKind.DATETIME, "发送时间")
+                     if "ctime" in r and r.get("ctime") is not None
+                     else value(r.get("sent_time") or "", xlsx_mod.CellKind.TEXT, "发送时间"))
+        cells = [value(i, xlsx_mod.CellKind.INTEGER, "序号")]
         if multi:
-            cells.append(sw.wc(part_label(r.get("page"), r.get("part"))))
-        cells += [sw.wc(r.get("time")), sw.wc(r.get("progress_ms")),
-                  sw.wc(r.get("mode_label")), sw.wc(r.get("content")),
-                  sw.wc(r.get("sent_time")), sw.wc(r.get("mid_hash")),
-                  sw.wc(r.get("color_hex")), sw.wc(r.get("fontsize")),
-                  sw.wc(r.get("weight")), sw.wc(r.get("pool_label")),
-                  sw.wc(r.get("attr")), sw.wc(r.get("id"))]
-        ws2.append([None] + cells)
+            cells.append(value(part_label(r.get("page"), r.get("part")),
+                               xlsx_mod.CellKind.TEXT, "分P"))
+        cells += [field(r, "time", xlsx_mod.CellKind.TEXT, "视频内时间"),
+                  field(r, "progress_ms", xlsx_mod.CellKind.INTEGER, "进度(ms)"),
+                  field(r, "mode_label", xlsx_mod.CellKind.TEXT, "模式"),
+                  wrap_cell(sw, field(r, "content", xlsx_mod.CellKind.TEXT, "正文")), sent_cell,
+                  field(r, "mid_hash", xlsx_mod.CellKind.TEXT, "用户哈希"),
+                  field(r, "color_hex", xlsx_mod.CellKind.TEXT, "颜色"),
+                  field(r, "fontsize", xlsx_mod.CellKind.INTEGER, "字号"),
+                  field(r, "weight", xlsx_mod.CellKind.INTEGER, "权重"),
+                  field(r, "pool_label", xlsx_mod.CellKind.TEXT, "池"),
+                  field(r, "attr", xlsx_mod.CellKind.INTEGER, "属性"),
+                  field(r, "id", xlsx_mod.CellKind.ID, "弹幕ID")]
+        sw.append([None] + cells)
     for idx, width in enumerate(widths, start=2):
         ws2.column_dimensions[get_column_letter(idx)].width = width
+    finish_table(ws2, detail_layout, len(ordered))
 
     # ---- 密度分布 ----
+    raw_buckets = page_minute_buckets(rows) if multi else minute_buckets(rows)
     ws3 = wb.create_sheet("密度分布")
+    headers3 = (["分P", "视频内时间", "该分钟条数", "占比", "累计占比", "累计条数"]
+                if multi else ["视频内时间", "该分钟条数", "占比", "累计占比", "累计条数"])
     sw.ws = ws3
-    headers3 = ["分P", "视频内时间", "该分钟条数", "占比", "累计占比", "累计条数"] \
-        if multi else ["视频内时间", "该分钟条数", "占比", "累计占比", "累计条数"]
+    density_layout = TableLayout(3, 2, len(headers3) + 1)
+    configure_table(ws3, density_layout)
     sw.title_row(ws3, f"{label} 弹幕密度分布（按分钟）", len(headers3))
     sw.header_row(ws3, headers3)
-    total = len(rows) or 1
-    # 多分P时各分P的分钟会互相重叠，必须带上分P聚合，否则密度会串台
-    raw_buckets = page_minute_buckets(rows) if multi else minute_buckets(rows)
+    total = len(rows)
     acc = 0
     for key, count in raw_buckets:
         acc += count
         page, minute = key if multi else (1, key)
         cells = []
         if multi:
-            cells.append(sw.wc(part_label(page)))
-        cells += [sw.wc(f"{hhmmss(minute * MINUTE_MS)} – "
-                        f"{hhmmss((minute + 1) * MINUTE_MS)}"),
-                  sw.wc(count), sw.wc(f"{count / total * 100:.1f}%"),
-                  sw.wc(f"{acc / total * 100:.1f}%"), sw.wc(acc)]
-        ws3.append([None] + cells)
-    total_row = [None, sw.wc("合计", font=xlsx_mod.F_HEADER,
-                             fill=xlsx_mod.FILL_HEADER)]
+            cells.append(value(part_label(page), xlsx_mod.CellKind.TEXT, "分P"))
+        cells += [value(f"{hhmmss(minute * MINUTE_MS)} – "
+                        f"{hhmmss((minute + 1) * MINUTE_MS)}",
+                        xlsx_mod.CellKind.TEXT, "视频内时间"),
+                  value(count, xlsx_mod.CellKind.INTEGER, "该分钟条数"),
+                  _percent_cell(count / total * 100 if total else None, "占比"),
+                  _percent_cell(acc / total * 100 if total else None, "累计占比"),
+                   value(acc, xlsx_mod.CellKind.INTEGER, "累计条数")]
+        sw.append([None] + cells)
+    finish_table(ws3, density_layout, len(raw_buckets))
+    total_row = [None, sw.wc("合计", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER)]
     if multi:
         total_row.append(sw.wc("", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER))
-    total_row += [sw.wc(len(rows), font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER),
-                  sw.wc("100.0%" if rows else "0.0%", font=xlsx_mod.F_HEADER,
-                        fill=xlsx_mod.FILL_HEADER), sw.wc(""), sw.wc("")]
-    ws3.append(total_row)
+    total_row += [sw.wc(len(rows), font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER,
+                        kind=xlsx_mod.CellKind.INTEGER),
+                  sw.wc(1.0 if rows else 0.0, font=xlsx_mod.F_HEADER,
+                        fill=xlsx_mod.FILL_HEADER, kind=xlsx_mod.CellKind.PERCENT),
+                  sw.wc("", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER),
+                  sw.wc("", font=xlsx_mod.F_HEADER, fill=xlsx_mod.FILL_HEADER)]
+    sw.append(total_row)
     for idx, width in enumerate((18, 26, 12, 10, 10, 10)[:len(headers3)], start=2):
         ws3.column_dimensions[get_column_letter(idx)].width = width
-    ws3.append([None])
-    ws3.append([None, sw.wc(
+    sw.append([None])
+    sw.append([None, sw.wc(
         "按弹幕出现的视频时间每 60 秒一档聚合。峰值档位通常对应"
         "「名场面」，可用于定位二次创作与切片素材。",
         font=xlsx_mod.F_CAPTION)])
 
-    wb.save(path)
+    if declared_status == "valid":
+        claimed_cell = xlsx_mod.checked_cell_value(
+            declared_value, xlsx_mod.CellKind.INTEGER, note="声明数量格式异常")
+        claimed_quality_status = "口径不可比较"
+        coverage_note = "口径不可比较，不计算覆盖率"
+    elif declared_status == "invalid":
+        claimed_cell = xlsx_mod.cell_value(None, xlsx_mod.CellKind.MISSING,
+                                            note="声明数量格式异常")
+        claimed_quality_status = "声明数量格式异常"
+        coverage_note = "声明数量格式异常，覆盖率不适用"
+    else:
+        claimed_cell = xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_RETURNED,
+                                            note="接口未返回")
+        claimed_quality_status = "接口未返回"
+        coverage_note = "接口未返回声明数量，覆盖率不适用"
+    def q(item, value, unit, note, presentation_state=None):
+        return QualityItem("弹幕", item, value, unit, note, presentation_state)
+    quality = [
+        q("候选记录总数", xlsx_mod.checked_cell_value(len(rows), xlsx_mod.CellKind.INTEGER), "条", "当前明细写入前没有独立候选总数，使用实际解析行作为可观测下界"),
+        q("实际写入弹幕明细数", xlsx_mod.checked_cell_value(len(rows), xlsx_mod.CellKind.INTEGER), "条", "按当前导出明细行计数"),
+        q("检测到的重复数", xlsx_mod.checked_cell_value(stats.get("duplicates", 0), xlsx_mod.CellKind.INTEGER), "条", "按 (page, id) 去重；单分P等价于 id"),
+        q("预计分段数", (xlsx_mod.checked_cell_value(stats["expected_segments"], xlsx_mod.CellKind.INTEGER)
+                         if stats.get("expected_segments") is not None else
+                         xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_RETURNED, note="接口未返回")), "段", "来自视频时长推算的预计值"),
+        q("接口声称弹幕数", claimed_cell, "条", "保留接口原始声明值；缺失时为接口未返回"),
+        q("声明数量口径状态", xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note=claimed_quality_status), "状态", "接口计数可能包含各池/各分P，口径不可比较" if claimed_quality_status == "口径不可比较" else claimed_quality_status),
+        q("覆盖率", xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note=coverage_note), "状态", "不根据不可比较声明值计算" if claimed_quality_status == "口径不可比较" else coverage_note),
+        q("是否取消", xlsx_mod.checked_cell_value(bool(stats.get("cancelled", False)), xlsx_mod.CellKind.BOOLEAN), "状态", "来自 crawler stats", "stop"),
+        q("是否截断", xlsx_mod.checked_cell_value(bool(stats.get("truncated", False)), xlsx_mod.CellKind.BOOLEAN), "状态", "来自 crawler stats", "warning"),
+        q("是否预算到限", xlsx_mod.checked_cell_value(stats.get("stopped_reason") == "budget_reached", xlsx_mod.CellKind.BOOLEAN), "状态", "来自 stopped_reason", "stop"),
+        q("是否部分成功", xlsx_mod.checked_cell_value(bool(rows) and bool(stats.get("cancelled") or stats.get("truncated") or stats.get("stopped_reason")), xlsx_mod.CellKind.BOOLEAN), "状态", "仅在存在有效弹幕且目标/分段未完整结束时为真", "warning"),
+    ]
+    quality.extend(primary_key_quality(
+        "主键", "弹幕主键(page,id)" if multi else "弹幕主键(id)",
+        denominator=stats.get("candidate_records"),
+        missing=stats.get("missing_id"),
+        invalid=stats.get("invalid_id"),
+        duplicates=stats.get("duplicates"),
+        dedup_discarded=stats.get("dedup_discarded"),
+        remaining_conflicts=stats.get("remaining_conflicts"),
+        source_note="来自弹幕解析/crawler 结构化统计；不扫描弹幕明细表",
+    ))
+    fields = []
+    for display, stable, dtype, metric in (
+        ("序号", "row_number", "整数", "本次输出顺序"), ("分P", "page", "整数", "多分P时的分P号"),
+        ("视频内时间", "time", "文本", "进度毫秒格式化为 HH:MM:SS"), ("进度(ms)", "progress_ms", "整数", "视频内进度"),
+        ("模式", "mode_label", "文本", "原始模式值映射"), ("正文", "content", "文本", "弹幕用户文本"),
+        ("发送时间", "ctime", "日期时间", "Unix 秒转换"), ("用户哈希", "mid_hash", "文本", "接口匿名标识"),
+        ("颜色", "color_hex", "文本", "颜色十六进制展示"), ("字号", "fontsize", "整数", "接口返回字号"),
+        ("权重", "weight", "整数", "接口返回权重"), ("池", "pool_label", "文本", "原始池值映射"),
+        ("属性", "attr", "整数", "接口返回属性"), ("弹幕ID", "id", "ID", "单分P按 id，多分P按 (page,id)"),
+    ):
+        fields.append(FieldDefinition("弹幕明细", display, stable, dtype, "", "是", "弹幕分段接口/本地解析", metric,
+                                      xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "接口未返回"))
+    def add_field(sheet, display, stable, dtype, metric):
+        fields.append(FieldDefinition(sheet, display, stable, dtype, "", "是", "弹幕接口/本地分析", metric,
+                                      xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "接口未返回或该结构未生成"))
+    for display, stable, dtype, metric in (
+        ("视频标题", "title", "文本", "视频接口标题"), ("BV号 / av号", "video_id", "文本", "视频标识"),
+        ("分P", "page_selection", "文本", "本次分P选择"), ("视频时长", "duration", "文本", "视频时长格式化"),
+        ("弹幕条数", "danmaku_count", "整数", "本次有效弹幕数"), ("完成情况", "completion", "文本", "crawler 终态说明"),
+        ("接口自称弹幕数", "claimed_danmaku", "整数", "接口原始声明值；仅供参考"),
+        ("抓取时间", "captured_at", "日期时间", "本地导出时间"),
+    ):
+        add_field("概览", display, stable, dtype, metric)
+    if analysis:
+        for display, stable, dtype, metric in (
+            ("弹幕条数", "danmaku_count", "整数", "本地分析总数"), ("独立发送者", "unique_senders", "整数", "按 mid_hash 去重"),
+            ("Top10发送者占比", "top10_user_ratio", "百分比", "Top10 发送者占全部弹幕比例"),
+            ("平均每条字数", "average_length", "小数", "正文长度平均值"), ("非白弹幕", "colored_count", "整数", "颜色非默认白色条数"),
+            ("发送时间跨度", "time_span_hours", "小数", "有效发送时间跨度"), ("类别", "category", "文本", "模式/池分类"),
+            ("条数", "count", "整数", "分类条数"), ("占比", "ratio", "百分比", "分类条数/分析总数"),
+            ("高频弹幕", "top_danmaku", "文本", "重复弹幕文本"), ("次数", "occurrences", "整数", "重复出现次数"),
+            ("热词", "top_word", "文本", "高频词"), ("出现在几条弹幕", "message_count", "整数", "包含该词的弹幕条数"),
+            ("分钟区间", "minute_range", "文本", "视频内分钟区间"),
+            ("条数", "count", "整数", "该分钟弹幕条数"), ("该分钟刷得最多", "top_in_minute", "文本", "分钟内代表性弹幕"),
+        ):
+            add_field("弹幕分析", display, stable, dtype, metric)
+        if multi:
+            add_field("弹幕分析", "分P", "page", "文本", "多分P时的分P标识")
+    if multi:
+        for display, stable, dtype, metric in (
+            ("分P", "page", "文本", "分P标识"), ("标题", "part", "文本", "分P标题"),
+            ("时长", "duration", "文本", "分P时长"), ("弹幕条数", "danmaku_count", "整数", "分P有效弹幕数"),
+            ("段数", "segments", "整数", "分P抓取段数"), ("完成情况", "completion", "文本", "分P终态"),
+        ):
+            add_field("分P汇总", display, stable, dtype, metric)
+    for display, stable, dtype, metric in (
+        ("视频内时间", "time", "文本", "视频内时间格式化"), ("该分钟条数", "count", "整数", "该分钟弹幕条数"),
+        ("占比", "ratio", "百分比", "该分钟条数/总弹幕数"), ("累计占比", "cumulative_ratio", "百分比", "累计条数/总弹幕数"),
+        ("累计条数", "cumulative_count", "整数", "按分钟累计弹幕数"),
+    ):
+        add_field("密度分布", display, stable, dtype, metric)
+    if multi:
+        add_field("密度分布", "分P", "page", "文本", "分P标识")
+    metadata = make_metadata(
+        tool="弹幕", report_type="弹幕分析", parameters={
+            "规范化视频 ID": xlsx_mod.cell_value(str(meta.get("bvid") or meta.get("aid") or ""), xlsx_mod.CellKind.ID),
+            "分P选择": xlsx_mod.cell_value("全部" if multi else str(meta.get("page", 1)), xlsx_mod.CellKind.TEXT),
+            "分段上限": (xlsx_mod.checked_cell_value(stats["max_segments"], xlsx_mod.CellKind.INTEGER)
+                         if stats.get("max_segments") is not None else
+                         xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note="上游未传入分段上限")),
+        }, parameter_allowlist=("规范化视频 ID", "分P选择", "分段上限"),
+        quality_items=quality, fields=fields)
+    write_metadata_sheets(wb, metadata)
+    xlsx_mod.save_workbook_atomic(wb, path)
     return path

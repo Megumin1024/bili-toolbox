@@ -14,6 +14,7 @@ import re
 import tempfile
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
 
@@ -23,6 +24,24 @@ from core import diagnostics, task_history
 from core import output as output_mod
 from core import xlsx as xlsx_mod
 from core.redact import EXPORT_SENSITIVE_KEY_RE as _SENSITIVE_KEY_RE
+from core.xlsx_metadata import (
+    FIELDS_SHEET,
+    FieldDefinition,
+    QualityItem,
+    QUALITY_SHEET,
+    contains_export_sensitive_text,
+    is_complete_metadata_workbook,
+    make_metadata,
+    primary_key_quality,
+    write_metadata_sheets,
+)
+from core.xlsx_presentation import (
+    TableLayout,
+    append_sheet_directory,
+    configure_table,
+    finish_table,
+    wrap_cell,
+)
 
 
 KIND_COMMENT = "comment"
@@ -140,6 +159,10 @@ class Source:
     key_fields: tuple[str, ...] = ()
     can_compare: bool = False
     duplicate_keys: int = 0
+    key_missing: int | None = None
+    key_invalid: int | None = None
+    key_dedup_discarded: int | None = None
+    key_remaining_conflicts: int | None = None
     invalid_time: int = 0
     issues: list[str] = field(default_factory=list)
     sheet_name: str = ""
@@ -360,20 +383,27 @@ def parse_epoch_seconds(value: Any) -> datetime | None:
     try:
         if isinstance(value, str):
             text = value.strip()
-            if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+            if len(text) > xlsx_mod.MAX_NUMERIC_TEXT_LENGTH:
                 return None
-            number = float(text)
-        elif isinstance(value, (int, float)):
-            number = float(value)
+            number = Decimal(text)
+        elif isinstance(value, int):
+            if value < 100_000_000 or value >= 10_000_000_000:
+                return None
+            number = Decimal(value)
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                return None
+            number = Decimal(repr(value))
         else:
             return None
-    except (TypeError, ValueError, OverflowError):
+    except (InvalidOperation, TypeError, ValueError, OverflowError):
         return None
-    if not math.isfinite(number) or number < 100_000_000 or number >= 10_000_000_000:
+    if not number.is_finite() or number < 100_000_000 or number >= 10_000_000_000:
         return None
     try:
-        return datetime.fromtimestamp(number, tz=LOCAL_TZ)
-    except (OverflowError, OSError, ValueError):
+        converted = xlsx_mod.unix_seconds_to_excel_datetime(value)
+        return converted.replace(tzinfo=LOCAL_TZ) if converted is not None else None
+    except (TypeError, OverflowError, OSError, ValueError):
         return None
 
 
@@ -489,9 +519,20 @@ def _xlsx_layout(path: Path, cancel: Cancel | None = None,
                 preferred = workbook[name]
                 break
         sheets = [preferred] if preferred is not None else list(workbook.worksheets)
+        metadata_rows = {
+            name: tuple(
+                tuple(row)
+                for row in workbook[name].iter_rows(max_row=40, values_only=True)
+            )
+            for name in (QUALITY_SHEET, FIELDS_SHEET)
+            if name in workbook.sheetnames
+        }
+        complete_metadata = is_complete_metadata_workbook(metadata_rows)
         for worksheet in sheets:
             if _cancelled(cancel):
                 break
+            if complete_metadata and worksheet.title in (QUALITY_SHEET, FIELDS_SHEET):
+                continue
             header_row_no = 0
             header_values: tuple[Any, ...] = ()
             for index, row in enumerate(worksheet.iter_rows(values_only=True), 1):
@@ -624,7 +665,7 @@ def sanitize_public_row(row: dict[str, Any]) -> dict[str, Any]:
         key_text = str(key)
         if _SENSITIVE_KEY_RE.search(key_text):
             continue
-        if isinstance(value, str) and task_history.contains_sensitive_text(value):
+        if contains_export_sensitive_text({key_text: value}):
             continue
         safe[key_text] = _json_value(value)
     return safe
@@ -641,15 +682,127 @@ def _json_value(value: Any) -> Any:
 
 
 def _xlsx_safe_value(value: Any) -> Any:
-    """保留数字/布尔/日期类型，同时清理控制字符并阻止公式注入。"""
+    """只清洗控制字符；公式防护由 ``SheetWriter`` 的 TEXT 类型完成。"""
     if isinstance(value, str):
-        cleaned = xlsx_mod.clean(value)
-        if cleaned.startswith(("=", "+", "-", "@")):
-            return "'" + cleaned
-        return cleaned
+        return xlsx_mod.clean_text(value)
     if isinstance(value, (datetime, date, time, int, float, bool)) or value is None:
         return value
     return _xlsx_safe_value(diagnostics.sanitize_text(value))
+
+
+_REPORT_ID_FIELDS = {
+    KIND_COMMENT: {"rpid", "mid", "用户mid"},
+    KIND_VIDEO: {"bvid", "aid", "owner_mid", "mid"},
+    KIND_MONITOR: {"bvid", "aid", "owner_mid", "mid", "room_id", "uid"},
+}
+_REPORT_INTEGER_FIELDS = {
+    KIND_COMMENT: {"like", "rcount", "level", "点赞数", "楼中楼数", "等级"},
+    KIND_VIDEO: {"duration", "view", "danmaku", "reply", "favorite", "coin", "share", "like"},
+    KIND_MONITOR: {"view", "danmaku", "reply", "favorite", "coin", "share", "like", "online"},
+}
+_REPORT_BOOLEAN_FIELDS = {KIND_COMMENT: {"vip", "大会员"}}
+_REPORT_DATETIME_FIELDS = {
+    KIND_COMMENT: {"ctime", "发布时间"},
+    KIND_VIDEO: {"pubdate", "fetched_at", "发布时间"},
+    KIND_MONITOR: {"ts"},
+}
+_REPORT_LONG_TEXT_FIELDS = {
+    "message", "评论内容", "title", "标题", "text", "正文", "content", "内容",
+    "note", "说明", "reason", "原因",
+}
+
+
+def _report_canonical_field(source: Source, field_name: str) -> str:
+    maps = {
+        KIND_COMMENT: COMMENT_HEADER_MAP,
+        KIND_VIDEO: VIDEO_HEADER_MAP,
+    }
+    mapping = maps.get(source.kind, {})
+    return mapping.get(field_name, field_name)
+
+
+def _report_kind(source: Source, field_name: str, value: Any) -> xlsx_mod.CellKind:
+    canonical = _report_canonical_field(source, field_name)
+    if field_name in _REPORT_ID_FIELDS.get(source.kind, set()) or canonical in _REPORT_ID_FIELDS.get(source.kind, set()):
+        return xlsx_mod.CellKind.ID
+    if field_name in _REPORT_INTEGER_FIELDS.get(source.kind, set()) or canonical in _REPORT_INTEGER_FIELDS.get(source.kind, set()):
+        return xlsx_mod.CellKind.INTEGER
+    if field_name in _REPORT_BOOLEAN_FIELDS.get(source.kind, set()) or canonical in _REPORT_BOOLEAN_FIELDS.get(source.kind, set()):
+        return xlsx_mod.CellKind.BOOLEAN
+    if field_name in _REPORT_DATETIME_FIELDS.get(source.kind, set()) or canonical in _REPORT_DATETIME_FIELDS.get(source.kind, set()):
+        return xlsx_mod.CellKind.DATETIME
+    if isinstance(value, bool):
+        return xlsx_mod.CellKind.BOOLEAN
+    if isinstance(value, int):
+        return xlsx_mod.CellKind.INTEGER
+    if isinstance(value, float):
+        return xlsx_mod.CellKind.DECIMAL
+    if isinstance(value, (datetime, date)):
+        return xlsx_mod.CellKind.DATETIME
+    return xlsx_mod.CellKind.TEXT
+
+
+def _report_cell(source: Source, field_name: str, value: Any, *, present=True):
+    if not present:
+        return xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_RETURNED,
+                                   note=f"{field_name}未返回")
+    if value is None:
+        return xlsx_mod.cell_value(None, xlsx_mod.CellKind.MISSING,
+                                   note=f"{field_name}缺失")
+    canonical = _report_canonical_field(source, field_name)
+    kind = _report_kind(source, field_name, value)
+    if kind is xlsx_mod.CellKind.DATETIME:
+        if source.fmt == FORMAT_JSONL and canonical in {"ctime", "pubdate", "fetched_at"}:
+            return xlsx_mod.unix_seconds_cell_value(value, note=f"{field_name}格式异常")
+        if canonical == "ts" and not isinstance(value, (datetime, date)):
+            try:
+                parsed = xlsx_mod.local_text_to_excel_datetime(value)
+            except (TypeError, ValueError):
+                return xlsx_mod.checked_cell_value(value, xlsx_mod.CellKind.TEXT,
+                                                   note=f"{field_name}格式异常")
+            return xlsx_mod.checked_cell_value(parsed, kind, note=f"{field_name}格式异常")
+        if isinstance(value, date) and not isinstance(value, datetime):
+            value = datetime.combine(value, time.min)
+    return xlsx_mod.checked_cell_value(_xlsx_safe_value(value), kind,
+                                       note=f"{field_name}格式异常")
+
+
+def _generic_cell(value, label="字段"):
+    if value is None:
+        return xlsx_mod.cell_value(None, xlsx_mod.CellKind.MISSING, note=f"{label}缺失")
+    if contains_export_sensitive_text(value):
+        return xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE,
+                                   note="已排除敏感值")
+    if isinstance(value, datetime):
+        kind = xlsx_mod.CellKind.DATETIME
+    elif isinstance(value, date):
+        value = datetime.combine(value, time.min)
+        kind = xlsx_mod.CellKind.DATETIME
+    elif isinstance(value, bool):
+        kind = xlsx_mod.CellKind.BOOLEAN
+    elif isinstance(value, int):
+        kind = xlsx_mod.CellKind.INTEGER
+    elif isinstance(value, float):
+        kind = xlsx_mod.CellKind.DECIMAL
+    else:
+        kind = xlsx_mod.CellKind.TEXT
+    return xlsx_mod.checked_cell_value(_xlsx_safe_value(value), kind,
+                                       note=f"{label}格式异常")
+
+
+def _percent_point_cell(value, label="百分比变化"):
+    """将报告内部的百分数点转换为 Excel 的 0~1 比例值。"""
+    if value is None:
+        return xlsx_mod.cell_value(None, xlsx_mod.CellKind.MISSING,
+                                   note=f"{label}不可计算")
+    return xlsx_mod.checked_cell_value(value / 100, xlsx_mod.CellKind.PERCENT,
+                                       note=f"{label}格式异常")
+
+
+def _summary_cell(value, label):
+    if isinstance(value, xlsx_mod.CellValue):
+        return value
+    return _generic_cell(_json_value(value), label)
 
 
 def _xlsx_safe_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -660,7 +813,7 @@ def _xlsx_safe_row(row: dict[str, Any]) -> dict[str, Any]:
         key_text = str(key)
         if _SENSITIVE_KEY_RE.search(key_text):
             continue
-        if isinstance(value, str) and task_history.contains_sensitive_text(value):
+        if contains_export_sensitive_text({key_text: value}):
             continue
         safe[key_text] = _xlsx_safe_value(value)
     return safe
@@ -672,28 +825,35 @@ def _row_time(source: Source, row: dict[str, Any]) -> datetime | None:
     return parse_source_time(row.get(source.time_field), epoch=source.fmt == FORMAT_JSONL)
 
 
-def _row_key(source: Source, row: dict[str, Any]) -> tuple[Any, ...] | None:
-    if not source.key_fields or any(field not in row for field in source.key_fields):
-        return None
+def _row_key_state(source: Source, row: dict[str, Any]) -> tuple[tuple[Any, ...] | None, str]:
+    if not source.key_fields:
+        return None, "not_applicable"
+    if any(field not in row or row.get(field) in (None, "")
+           for field in source.key_fields):
+        return None, "missing"
     values: list[Any] = []
     for field_name in source.key_fields:
         value = row.get(field_name)
         if field_name in {"ctime", "fetched_at", "ts"}:
             value = _row_time(source, row)
             if value is None:
-                return None
+                return None, "invalid"
             value = int(value.timestamp())
-        elif value is None or value == "":
-            return None
         elif field_name == "rpid":
             try:
                 value = int(value)
-            except (TypeError, ValueError):
-                value = str(value)
+            except (TypeError, ValueError, OverflowError):
+                return None, "invalid"
         else:
             value = str(value).strip()
+            if not value:
+                return None, "missing"
         values.append(value)
-    return tuple(values)
+    return tuple(values), "valid"
+
+
+def _row_key(source: Source, row: dict[str, Any]) -> tuple[Any, ...] | None:
+    return _row_key_state(source, row)[0]
 
 
 def _required_fields(source: Source) -> set[str]:
@@ -736,6 +896,8 @@ def read_source(source_or_path: Source | str | Path, preview_limit: int = PREVIE
     count = 0
     invalid_time = 0
     duplicate_keys = 0
+    key_missing = 0
+    key_invalid = 0
     source.status = STATUS_READABLE
     cancelled = False
     try:
@@ -755,7 +917,11 @@ def read_source(source_or_path: Source | str | Path, preview_limit: int = PREVIE
                     invalid_time += 1
                 else:
                     time_values.append(current_time)
-            key = _row_key(source, row)
+            key, key_state = _row_key_state(source, row)
+            if key_state == "missing":
+                key_missing += 1
+            elif key_state == "invalid":
+                key_invalid += 1
             if key is not None:
                 if key in keys:
                     duplicate_keys += 1
@@ -782,6 +948,10 @@ def read_source(source_or_path: Source | str | Path, preview_limit: int = PREVIE
     source.time_end = max(time_values) if time_values else None
     source.invalid_time = invalid_time
     source.duplicate_keys = duplicate_keys
+    source.key_missing = key_missing if source.key_fields else None
+    source.key_invalid = key_invalid if source.key_fields else None
+    source.key_dedup_discarded = None
+    source.key_remaining_conflicts = duplicate_keys if source.key_fields else None
     source.metrics = _source_metrics(source, numeric_seen)
     if cancelled:
         source.status = STATUS_INCOMPLETE
@@ -1225,16 +1395,17 @@ def _atomic_text(path: Path, lines: Iterable[str]) -> None:
             temp_path.unlink(missing_ok=True)
 
 
-def _atomic_xlsx(path: Path, build: Callable[[Path], None]) -> None:
-    temp_path: Path | None = None
+def _atomic_xlsx(path: Path, build: Callable[[], Any], before_replace=None) -> None:
+    workbook = None
     try:
-        with tempfile.NamedTemporaryFile(prefix=".report-", suffix=".xlsx", dir=str(path.parent), delete=False) as handle:
-            temp_path = Path(handle.name)
-        build(temp_path)
-        temp_path.replace(path)
+        workbook = build()
+        xlsx_mod.save_workbook_atomic(workbook, path, before_replace=before_replace)
     finally:
-        if temp_path and temp_path.exists():
-            temp_path.unlink(missing_ok=True)
+        if workbook is not None:
+            try:
+                workbook.close()
+            except Exception:
+                pass
 
 
 def _verify_unchanged(before: dict[str, Fingerprint]) -> None:
@@ -1266,33 +1437,180 @@ def _export_context(sources: Iterable[Source]) -> dict[str, Fingerprint]:
     return {source.path: snapshot_source(source.path) for source in sources}
 
 
-def _write_rows_xlsx(path: Path, source: Source, rows: Iterable[dict[str, Any]], summary: dict[str, Any]) -> None:
-    def build(temp: Path):
+def _write_rows_xlsx(path: Path, source: Source, rows: Iterable[dict[str, Any]],
+                     summary: dict[str, Any], before_replace=None) -> None:
+    written_count = {"value": 0}
+    output_key_conflicts = {"value": 0}
+    def build():
         workbook = xlsx_mod.new_workbook()
+        sw = xlsx_mod.SheetWriter(workbook)
         data_sheet = workbook.create_sheet("数据")
+        sw.ws = data_sheet
         fields = list(source.original_headers) if source.original_headers else list(source.fields)
         fields = [field for field in fields if not _SENSITIVE_KEY_RE.search(str(field))]
-        data_sheet.append([_xlsx_safe_value(field) for field in fields])
+        data_layout = TableLayout(1, 1, max(1, len(fields)))
+        configure_table(data_sheet, data_layout)
+        sw.append([_xlsx_safe_value(field) for field in fields])
+        output_keys = set()
         for row in rows:
+            key = _row_key(source, row)
+            if key is not None:
+                if key in output_keys:
+                    output_key_conflicts["value"] += 1
+                output_keys.add(key)
             values = _xlsx_safe_row(row)
-            data_sheet.append([values.get(field) for field in fields])
+            row_cells = []
+            for field in fields:
+                cell = _report_cell(source, field, values.get(field), present=field in values)
+                row_cells.append(wrap_cell(sw, cell) if field in _REPORT_LONG_TEXT_FIELDS else cell)
+            sw.append(row_cells)
+            written_count["value"] += 1
+        finish_table(data_sheet, data_layout, written_count["value"])
         report = workbook.create_sheet("报告汇总")
-        report.append(["字段", "值"])
+        sw.ws = report
+        summary_layout = TableLayout(1, 1, 2)
+        configure_table(report, summary_layout)
+        sw.append([_generic_cell("字段", "报告汇总"), _generic_cell("值", "报告汇总")])
         for key, value in summary.items():
-            report.append([_xlsx_safe_value(str(key)), _xlsx_safe_value(value)])
-        workbook.save(temp)
-    _atomic_xlsx(path, build)
+                sw.append([_generic_cell(str(key), "报告字段"), _generic_cell(value, str(key))])
+        finish_table(report, summary_layout, len(summary))
+        quality = []
+        def q(item, raw, kind, unit, note):
+            value = (xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note=note)
+                     if raw is None else xlsx_mod.checked_cell_value(raw, kind, note=note))
+            return QualityItem("报告中心", item, value, unit, note)
+        quality.extend([
+            q("来源记录总数", source.record_count, xlsx_mod.CellKind.INTEGER, "条", "Source 已观测记录数"),
+            q("实际写入数据表记录数", written_count["value"], xlsx_mod.CellKind.INTEGER, "条", "筛选生成器真实写入数"),
+            q("检测到的重复键数量", source.duplicate_keys, xlsx_mod.CellKind.INTEGER, "条", "Source 统计；不从输出表猜测"),
+            q("无法解析时间数量", source.invalid_time, xlsx_mod.CellKind.INTEGER, "条", "Source 统计"),
+            q("可观测问题数量", len(source.issues), xlsx_mod.CellKind.INTEGER, "条", "已脱敏的问题摘要数量"),
+            q("接口声称数量", None, xlsx_mod.CellKind.INTEGER, "条", "本地报告中心不适用"),
+            q("覆盖率", None, xlsx_mod.CellKind.PERCENT, "状态", "本地报告中心不适用"),
+            q("是否取消", False, xlsx_mod.CellKind.BOOLEAN, "状态", "导出完成"),
+            q("是否部分成功", source.status != STATUS_READABLE, xlsx_mod.CellKind.BOOLEAN, "状态", "来自 Source.status"),
+        ])
+        key_label = " / ".join(source.key_fields) if source.key_fields else "主键"
+        quality.extend(primary_key_quality(
+            "主键", key_label,
+            denominator=source.record_count if source.key_fields else None,
+            missing=source.key_missing,
+            invalid=source.key_invalid,
+            duplicates=source.duplicate_keys if source.key_fields else None,
+            dedup_discarded=0 if source.key_fields else None,
+            remaining_conflicts=output_key_conflicts["value"] if source.key_fields else None,
+            source_note="来自 Source 结构化统计；导出器不扫描 XLSX 工作表",
+        ))
+        fields_meta = []
+        known_fields = set(source.fields)
+        for field_name in fields:
+            known = field_name in known_fields and (
+                field_name in _REPORT_ID_FIELDS.get(source.kind, set())
+                or field_name in _REPORT_INTEGER_FIELDS.get(source.kind, set())
+                or field_name in _REPORT_BOOLEAN_FIELDS.get(source.kind, set())
+                or field_name in _REPORT_DATETIME_FIELDS.get(source.kind, set())
+            )
+            dtype = _report_kind(source, field_name, None).value if known else "源文件未声明/未知"
+            field_source = "报告中心已知映射" if known else "源文件未声明/未知"
+            metric = "按 Source 已知字段处理" if known else "源文件未声明/未知"
+            fields_meta.append(FieldDefinition(
+                "数据", str(field_name), str(field_name), dtype, "", "是", field_source,
+                metric, xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE),
+                "字段缺失或源文件未声明"))
+        for key, value in summary.items():
+            fields_meta.append(FieldDefinition(
+                "报告汇总", str(key), f"summary.{key}",
+                "布尔" if isinstance(value, bool) else
+                "整数" if isinstance(value, int) and not isinstance(value, bool) else
+                "小数" if isinstance(value, float) else "文本",
+                "", "是", "报告中心结构化筛选结果", "本次导出摘要",
+                xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE),
+                "未生成或不适用"))
+        fields_meta.extend((
+            FieldDefinition("报告汇总", "字段", "summary_key", "文本", "", "否",
+                            "报告中心结构化筛选结果", "摘要键", xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "不适用"),
+            FieldDefinition("报告汇总", "值", "summary_value", "文本/数值", "", "是",
+                            "报告中心结构化筛选结果", "摘要值；敏感值已排除", xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "不适用或已排除敏感值"),
+        ))
+        metadata = make_metadata(
+            tool="报告中心", report_type="筛选导出",
+            parameters={
+                "来源 basename": xlsx_mod.cell_value(source.file_name, xlsx_mod.CellKind.TEXT),
+                "来源类型": xlsx_mod.cell_value(source.kind_label, xlsx_mod.CellKind.TEXT),
+                "是否包含筛选条件": xlsx_mod.cell_value(bool(summary.get("是否包含筛选条件", False)), xlsx_mod.CellKind.BOOLEAN),
+            },
+            parameter_allowlist=("来源 basename", "来源类型", "是否包含筛选条件"),
+            quality_items=quality, fields=fields_meta)
+        write_metadata_sheets(workbook, metadata)
+        return workbook
+    _atomic_xlsx(path, build, before_replace=before_replace)
 
 
-def _write_summary_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]]]) -> None:
-    def build(temp: Path):
+def _write_summary_xlsx(path: Path, sheets: list[tuple[str, list[list[Any]]]],
+                        before_replace=None) -> None:
+    def build():
         workbook = xlsx_mod.new_workbook()
-        for name, rows in sheets:
+        sw = xlsx_mod.SheetWriter(workbook)
+        for index, (name, rows) in enumerate(sheets):
             worksheet = workbook.create_sheet(name[:31])
+            sw.ws = worksheet
+            width = max(1, len(rows[0]) if rows else 1)
+            layout = TableLayout(1, 1, width)
+            configure_table(worksheet, layout)
             for row in rows:
-                worksheet.append([_xlsx_safe_value(_json_value(value)) for value in row])
-        workbook.save(temp)
-    _atomic_xlsx(path, build)
+                sw.append([_summary_cell(value, str(name)) for value in row])
+            finish_table(worksheet, layout, max(0, len(rows) - 1))
+            if index == 0 and name in ("对比汇总", "时间段汇总"):
+                append_sheet_directory(
+                    sw,
+                    worksheet,
+                    tuple((sheet_name[:31], sheet_name[:31]) for sheet_name, _ in sheets)
+                    + (("数据质量", "数据质量"), ("字段说明", "字段说明")),
+                    prefix_columns=0,
+                )
+        output_rows = sum(max(0, len(rows) - 1) for _name, rows in sheets)
+        quality = [
+            QualityItem("报告中心", "输出业务表数量",
+                        xlsx_mod.checked_cell_value(len(sheets), xlsx_mod.CellKind.INTEGER), "张", "本次导出的业务结果表"),
+            QualityItem("报告中心", "实际输出记录数",
+                        xlsx_mod.checked_cell_value(output_rows, xlsx_mod.CellKind.INTEGER), "行", "按导出表头之后的真实行数"),
+            QualityItem("报告中心", "接口声称数量",
+                        xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note="本地报告中心不适用"), "条", "本地比较结果没有接口声明数量"),
+            QualityItem("报告中心", "覆盖率",
+                        xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE, note="本地报告中心不适用"), "状态", "不计算外部接口覆盖率"),
+            QualityItem("报告中心", "是否取消",
+                        xlsx_mod.checked_cell_value(False, xlsx_mod.CellKind.BOOLEAN), "状态", "导出完成"),
+        ]
+        fields = []
+        for name, rows in sheets:
+            headers = rows[0] if rows else []
+            for header in headers:
+                text = str(header)
+                stable = {
+                    "字段": "field", "值": "value", "A值": "a_value", "B值": "b_value",
+                    "绝对变化": "absolute_change", "百分比变化": "percent_change",
+                    "可比较记录": "compared_records", "A缺失": "missing_a", "B缺失": "missing_b",
+                    "业务键": "business_key", "变化字段": "changed_fields", "时间段": "period",
+                    "时间": "time", "样本数": "sample_count", "有效数值数": "valid_count",
+                    "缺失数据数": "missing_data", "缺失时间数": "missing_time",
+                    "起始值": "start_value", "结束值": "end_value", "平均值": "average",
+                    "最大值": "maximum", "最小值": "minimum",
+                }.get(text, f"report.{name[:20]}.{text}")
+                fields.append(FieldDefinition(
+                    name[:31], text, stable, "源文件未声明/未知", "", "是",
+                    "报告中心计算结果", "报告中心输出字段；源文件口径不适用",
+                    xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE),
+                    "字段缺失或不适用"))
+        metadata = make_metadata(
+            tool="报告中心", report_type="本地比较报告",
+            parameters={
+                "业务表数量": xlsx_mod.cell_value(len(sheets), xlsx_mod.CellKind.INTEGER),
+                "导出类型": xlsx_mod.cell_value("本地比较", xlsx_mod.CellKind.TEXT),
+            }, parameter_allowlist=("业务表数量", "导出类型"),
+            quality_items=quality, fields=fields)
+        write_metadata_sheets(workbook, metadata)
+        return workbook
+    _atomic_xlsx(path, build, before_replace=before_replace)
 
 
 def export_filtered(source_value: Source | ReadResult, out_dir: str | Path, fmt: str,
@@ -1319,7 +1637,12 @@ def export_filtered(source_value: Source | ReadResult, out_dir: str | Path, fmt:
     if suffix == ".jsonl":
         _atomic_text(output, (json.dumps(sanitize_public_row(row), ensure_ascii=False) + "\n" for row in matching_rows()))
     else:
-        _write_rows_xlsx(output, source, matching_rows(), {"来源类型": source.kind_label, "来源文件": source.file_name, "筛选条件": query or "（无）"})
+        _write_rows_xlsx(
+            output, source, matching_rows(),
+            {"来源类型": source.kind_label, "来源文件": source.file_name,
+             "是否包含筛选条件": bool(needle)},
+            before_replace=lambda: _verify_unchanged(before),
+        )
     _verify_unchanged(before)
     return output
 
@@ -1350,12 +1673,17 @@ def export_file_comparison(result: ComparisonResult, out_dir: str | Path, fmt: s
     else:
         summary = result.as_dict(redact_paths=True)
         metric_rows = [["字段", "A值", "B值", "绝对变化", "百分比变化", "可比较记录", "A缺失", "B缺失", "说明"]]
-        metric_rows.extend([[item.field, item.a_value, item.b_value, item.absolute_change, item.percent_change,
+        metric_rows.extend([[item.field, item.a_value, item.b_value, item.absolute_change,
+                             _percent_point_cell(item.percent_change),
                              item.compared_records, item.missing_a, item.missing_b, item.note] for item in result.metric_changes])
         row_rows = [["业务键", "变化字段"]]
         row_rows.extend([[" / ".join(map(str, item.get("key", []))), ", ".join(item.get("changed_fields", []))] for item in result.row_changes])
         summary_rows = [["字段", "值"]] + [[key, value] for key, value in summary.items()]
-        _write_summary_xlsx(output, [("对比汇总", summary_rows), ("指标变化", metric_rows), ("记录变化", row_rows)])
+        _write_summary_xlsx(
+            output, [("对比汇总", summary_rows), ("指标变化", metric_rows),
+                     ("记录变化", row_rows)],
+            before_replace=lambda: _verify_unchanged(before),
+        )
     _verify_unchanged(before)
     return output
 
@@ -1384,10 +1712,14 @@ def export_period_comparison(result: PeriodComparisonResult, out_dir: str | Path
                    ["结束值", result.period_a.end_value, result.period_b.end_value], ["平均值", result.period_a.average, result.period_b.average],
                    ["最大值", result.period_a.maximum, result.period_b.maximum], ["最小值", result.period_a.minimum, result.period_b.minimum],
                    ["绝对变化", result.period_a.absolute_change, result.period_b.absolute_change],
-                   ["百分比变化", result.period_a.percent_change, result.period_b.percent_change]]
+                   ["百分比变化", _percent_point_cell(result.period_a.percent_change),
+                    _percent_point_cell(result.period_b.percent_change)]]
         samples = [["时间段", "时间", result.metric]]
         samples.extend([["A", format_datetime(current), value] for current, value in result.values_a])
         samples.extend([["B", format_datetime(current), value] for current, value in result.values_b])
-        _write_summary_xlsx(output, [("时间段汇总", summary), ("样本序列", samples)])
+        _write_summary_xlsx(
+            output, [("时间段汇总", summary), ("样本序列", samples)],
+            before_replace=lambda: _verify_unchanged(before),
+        )
     _verify_unchanged(before)
     return output

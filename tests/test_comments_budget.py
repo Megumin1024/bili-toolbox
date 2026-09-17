@@ -298,6 +298,86 @@ class PipelineBudgetWiringTests(unittest.TestCase):
         self.assertIsNone(captured["kw"]["budget"])
         self.assertNotIn("stopped_reason", result["stats"])
 
+    def test_dynamic_metadata_failure_still_completes_local_analysis_and_xlsx(self):
+        row = {
+            "rpid": 1, "is_main": True, "mid": 2, "uname": "本地用户",
+            "vip": False, "sex": "保密", "level": 6, "message": "离线测试",
+            "like": 0, "rcount": 0, "ctime": 1_700_000_000, "location": "",
+        }
+
+        class FakeCrawler:
+            def __init__(self, *args, **kw):
+                Path(args[2]).mkdir(parents=True, exist_ok=True)
+                self.out_path = Path(args[2]) / "comments.jsonl"
+                self.out_path.write_text(json.dumps(row, ensure_ascii=False) + "\n",
+                                          encoding="utf-8")
+
+            def crawl(self):
+                return {"main": 1, "sub": 0, "pages": 1,
+                        "aborted": False, "cancelled": False,
+                        "status": "completed", "error": None}
+
+        with patch.object(pipeline.links, "parse_link",
+                          return_value=("dynamic", 123, {})), \
+                patch.object(pipeline.links, "get_dynamic_meta",
+                             side_effect=RuntimeError("metadata unavailable")), \
+                patch.object(pipeline.session, "grpc_metadata", return_value=[]), \
+                patch.object(pipeline.core, "Crawler", FakeCrawler):
+            result = pipeline.run_pipeline("t.bilibili.com/123", self.out,
+                                           open_result=False)
+        self.assertTrue(Path(result["xlsx"]).is_file())
+        self.assertIn("B站声称评论总数：接口未返回", Path(result["report"]).read_text(encoding="utf-8"))
+
+    def test_jsonl_rpid_reparse_is_exact_and_bad_rows_do_not_block_good_rows(self):
+        rows = [
+            {"rpid": "1"}, {"rpid": 1}, {"rpid": 1.5},
+            {"rpid": float(2 ** 53)}, {"rpid": float("nan")},
+            {"rpid": float("inf")}, {"rpid": True},
+            {"rpid": "9" * 5000}, {"rpid": "1e3"},
+            {"rpid": 9007199254740991.0}, {"rpid": 2},
+        ]
+        source_text = "".join(
+            json.dumps(row, ensure_ascii=False, allow_nan=True) + "\n"
+            for row in rows
+        )
+        captured = {}
+        meta = {"title": "离线测试", "author": "作者", "pub_ts": None,
+                "claimed_comment_count": 3}
+
+        class FakeCrawler:
+            def __init__(self, *args, **kw):
+                Path(args[2]).mkdir(parents=True, exist_ok=True)
+                self.out_path = Path(args[2]) / "comments.jsonl"
+                self.out_path.write_text(source_text, encoding="utf-8")
+
+            def crawl(self):
+                return {"main": 0, "sub": 0, "pages": 0, "aborted": False,
+                        "cancelled": False, "status": "completed", "error": None}
+
+        def capture_analyze(parsed_rows, _meta):
+            captured["rows"] = parsed_rows
+            return "", {}
+
+        with patch.object(pipeline.links, "parse_link",
+                          return_value=("dynamic", 123, {})), \
+                patch.object(pipeline.links, "get_dynamic_meta", return_value=meta), \
+                patch.object(pipeline.session, "grpc_metadata", return_value=[]), \
+                patch.object(pipeline.core, "Crawler", FakeCrawler), \
+                patch.object(pipeline.core, "analyze", side_effect=capture_analyze), \
+                patch.object(pipeline.core, "export_xlsx", return_value=None):
+            result = pipeline.run_pipeline("t.bilibili.com/123", self.out,
+                                           open_result=False)
+
+        parsed = captured["rows"]
+        self.assertEqual([row["rpid"] for row in parsed],
+                         [1, 9007199254740991, 2])
+        self.assertTrue(all(isinstance(row["rpid"], int) for row in parsed))
+        self.assertEqual(result["stats"]["jsonl_candidate_records"], len(rows))
+        self.assertEqual(result["stats"]["jsonl_duplicate_rows"], 1)
+        self.assertEqual(result["stats"]["jsonl_invalid_rpid"], 7)
+        self.assertEqual(result["stats"]["jsonl_remaining_rpid_conflicts"], 0)
+        self.assertEqual(Path(result["jsonl"]).read_text(encoding="utf-8"), source_text)
+
 
 class CommentsPageParamTests(unittest.TestCase):
     """页面参数层：不建 QApplication，只验「存得下、读得出、往返不丢」。

@@ -13,6 +13,7 @@ fetch / sleeper / budget / notify 均可注入以便离线测试。
 """
 import os
 import time
+from collections import Counter
 from pathlib import Path
 
 from core.budget import BudgetExhaustedError, TaskBudget
@@ -164,6 +165,23 @@ def run_pipeline(target, out_dir, mode=core.DEFAULT_MODE,
 
     xlsx_path = ""
     if rows:
+        key_values = []
+        missing = invalid = 0
+        for row in rows:
+            room_id = row.get("room_id") if isinstance(row, dict) else None
+            if room_id in (None, ""):
+                missing += 1
+                continue
+            if mode == "track" and row.get("ts") in (None, ""):
+                invalid += 1
+                continue
+            key_values.append((str(room_id), str(row.get("ts", "")) if mode == "track" else "snapshot"))
+        duplicates = sum(count - 1 for count in Counter(key_values).values() if count > 1)
+        stats["key_stats"] = {
+            "candidate_records": len(rows), "missing": missing, "invalid": invalid,
+            "duplicates": duplicates, "dedup_discarded": 0,
+            "remaining_conflicts": duplicates,
+        }
         xlsx_path = (out_path / (f"直播追踪_{stats['room_id']}.xlsx" if mode == "track"
                                  else f"直播快照_{stats['room_id']}.xlsx"))
         core.export_xlsx(rows, stats, xlsx_path, progress=p)

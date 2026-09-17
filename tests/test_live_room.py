@@ -15,6 +15,7 @@ import ast
 import json
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from openpyxl import load_workbook
@@ -181,7 +182,7 @@ class SnapshotPipelineTests(LiveRoomTestBase):
         xlsx = Path(result["xlsx"])
         self.assertTrue(xlsx.exists())
         wb = load_workbook(xlsx)
-        self.assertEqual(wb.sheetnames, ["概览"])
+        self.assertEqual(wb.sheetnames, ["概览", "数据质量", "字段说明"])
 
     def test_snapshot_no_jsonl_file(self):
         channel = statuses_channel([0])
@@ -213,7 +214,15 @@ class TrackPipelineTests(LiveRoomTestBase):
             self.assertIn("ts", row)
         self.assertEqual([row["live_status"] for row in lines], [0, 1, 1])
         wb = load_workbook(Path(result["xlsx"]))
-        self.assertEqual(wb.sheetnames, ["概览", "快照明细"])
+        self.assertEqual(wb.sheetnames, ["概览", "快照明细", "数据质量", "字段说明"])
+        detail_row = wb["快照明细"][4]
+        self.assertIsInstance(detail_row[2].value, datetime)
+        self.assertEqual(detail_row[2].number_format, "yyyy-mm-dd hh:mm:ss")
+        self.assertIsInstance(detail_row[5].value, int)
+        self.assertEqual(detail_row[5].number_format, "#,##0")
+        self.assertEqual(detail_row[9].data_type, "s")
+        self.assertEqual(detail_row[9].number_format, "@")
+        wb.close()
         # 轮间等待只发生在轮与轮之间（3 轮 = 2 次等待），每次 30s。
         self.assertAlmostEqual(sleep.total, 60.0)
 

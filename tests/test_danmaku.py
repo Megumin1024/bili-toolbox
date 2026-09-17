@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -426,7 +427,7 @@ class ExportTests(unittest.TestCase):
 
     def test_three_sheets(self):
         wb = self._export([core.row_from_elem(make_elem(1))])
-        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布"])
+        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布", "数据质量", "字段说明"])
 
     def test_detail_rows_match_input(self):
         rows = [core.row_from_elem(make_elem(i)) for i in (1, 2, 3)]
@@ -470,7 +471,7 @@ class ExportTests(unittest.TestCase):
 
     def test_empty_rows_still_produces_a_valid_file(self):
         wb = self._export([])
-        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布"])
+        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布", "数据质量", "字段说明"])
         ws = wb["概览"]
         values = [c.value for r in ws.iter_rows() for c in r]
         self.assertTrue(any(isinstance(v, str) and v.startswith("一段都没抓到")
@@ -522,6 +523,22 @@ class PipelineTests(unittest.TestCase):
         result = self._run(FakeFetch({}), claimed=0)
         self.assertEqual(result["rows"], 0)
         self.assertTrue(Path(result["xlsx"]).exists())
+
+    def test_zero_rows_with_invalid_claimed_count_still_exports(self):
+        result = self._run(FakeFetch({}), claimed=1.5)
+        self.assertEqual(result["rows"], 0)
+        self.assertTrue(Path(result["xlsx"]).exists())
+        workbook = load_workbook(result["xlsx"], data_only=False)
+        quality = workbook["数据质量"]
+        by_item = {
+            quality.cell(row, 3).value: row
+            for row in range(1, quality.max_row + 1)
+            if quality.cell(row, 3).value
+        }
+        declared = quality.cell(by_item["接口声称弹幕数"], 4)
+        self.assertIsNone(declared.value)
+        self.assertIn("声明数量格式异常", declared.comment.text)
+        workbook.close()
 
     def test_meta_lookup_uses_the_view_api_once(self):
         fetch = FakeFetch({1: make_segment(make_elem(1))})
@@ -618,7 +635,7 @@ class MultiPartExportTests(unittest.TestCase):
     def test_sheet_set_and_order(self):
         wb = self._export(self._rows())
         self.assertEqual(wb.sheetnames,
-                         ["概览", "分P汇总", "弹幕明细", "密度分布"])
+                         ["概览", "分P汇总", "弹幕明细", "密度分布", "数据质量", "字段说明"])
 
     def test_single_part_has_no_part_column_or_summary_sheet(self):
         """单分P是绝大多数情况：恒为 "P1" 的列和只有一行的汇总表都是噪音。"""
@@ -629,9 +646,26 @@ class MultiPartExportTests(unittest.TestCase):
                           "truncated": False, "cancelled": False,
                           "duplicates": 0}, path, parts=None)
         wb = load_workbook(path)
-        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布"])
+        self.assertEqual(wb.sheetnames, ["概览", "弹幕明细", "密度分布", "数据质量", "字段说明"])
         header = [c.value for c in wb["弹幕明细"][3]]
         self.assertEqual(header[1:4], ["序号", "视频内时间", "进度(ms)"])
+
+    def test_detail_cells_keep_id_integer_datetime_and_text_contracts(self):
+        row = core.row_from_elem(make_elem(1234567890123456789, progress=95_453))
+        row["content"] = "=1+1"
+        wb = self._export([row], parts=[])
+        detail = wb["弹幕明细"]
+        data = detail[4]
+        self.assertIsInstance(data[3].value, int)
+        self.assertEqual(data[3].number_format, "#,##0")
+        self.assertIsInstance(data[6].value, datetime)
+        self.assertEqual(data[6].number_format, "yyyy-mm-dd hh:mm:ss")
+        self.assertEqual(data[5].value, "=1+1")
+        self.assertEqual(data[5].data_type, "s")
+        self.assertTrue(data[5].quotePrefix)
+        self.assertEqual(data[13].data_type, "s")
+        self.assertEqual(data[13].number_format, "@")
+        wb.close()
 
     def test_part_column_is_second_in_detail(self):
         header = [c.value for c in self._export(self._rows())["弹幕明细"][3]]
@@ -859,7 +893,7 @@ class AllPagesPipelineTests(unittest.TestCase):
         result, _ = self._run(fetch, pages=MULTI_PAGES[:1])
         self.assertEqual(result["rows"], 1)
         self.assertEqual(load_workbook(result["xlsx"]).sheetnames,
-                         ["概览", "弹幕分析", "弹幕明细", "密度分布"])
+                         ["概览", "弹幕分析", "弹幕明细", "密度分布", "数据质量", "字段说明"])
 
     def test_all_pages_off_only_touches_the_requested_part(self):
         fetch = PerPartFetch({202: {1: make_segment(make_elem(9))}})
@@ -955,7 +989,7 @@ class SpecifiedPagesPipelineTests(unittest.TestCase):
         fetch = PerPartFetch({202: {1: make_segment(make_elem(9))}})
         result, _ = self._run(fetch, pages="2")
         self.assertEqual(load_workbook(result["xlsx"]).sheetnames,
-                         ["概览", "弹幕分析", "弹幕明细", "密度分布"])
+                         ["概览", "弹幕分析", "弹幕明细", "密度分布", "数据质量", "字段说明"])
         self.assertTrue(Path(result["jsonl"]).exists(),
                         "只选一个分P时 jsonl 指向具体文件")
 

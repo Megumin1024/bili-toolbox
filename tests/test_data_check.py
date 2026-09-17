@@ -421,6 +421,36 @@ class DataCheckCoreTests(unittest.TestCase):
         self.assertEqual(result["stats"]["total_issues"], 0)
         self.assertEqual(result["files"][0]["structure"], "已知评论 Excel")
 
+    def test_metadata_skip_requires_a_complete_marked_pair(self):
+        partial = self.write_workbook("partial-metadata.xlsx", [
+            ("数据质量", [["rpid", "评论内容"], [1, "重复"], [1, "重复"],
+                         ["BiliToolbox:XLSX_METADATA:v1"]]),
+        ])
+        partial_result = self.run_check([partial])
+        self.assertEqual(partial_result["stats"]["duplicates"], 1)
+
+        one_marked = self.write_workbook("one-marked-metadata.xlsx", [
+            ("数据质量", [["rpid", "评论内容"], [1, "重复"], [1, "重复"],
+                         ["BiliToolbox:XLSX_METADATA:v1"]]),
+            ("字段说明", [["普通表头"], ["普通同名表"]]),
+        ])
+        one_marked_result = self.run_check([one_marked])
+        self.assertEqual(one_marked_result["stats"]["duplicates"], 1)
+
+        complete = self.write_workbook("complete-metadata.xlsx", [
+            ("数据质量", [["普通表头"], ["BiliToolbox:XLSX_METADATA:v1"]]),
+            ("字段说明", [["普通表头"], ["BiliToolbox:XLSX_METADATA:v1"]]),
+        ])
+        complete_result = self.run_check([complete])
+        self.assertEqual(complete_result["stats"]["duplicates"], 0)
+        self.assertEqual(complete_result["stats"]["record_count"], 0)
+
+        unmarked = self.write_workbook("unmarked-metadata-name.xlsx", [
+            ("数据质量", [["rpid", "评论内容"], [1, "重复"], [1, "重复"]]),
+        ])
+        unmarked_result = self.run_check([unmarked])
+        self.assertEqual(unmarked_result["stats"]["duplicates"], 1)
+
     def test_normal_video_excel(self):
         path = self.write_workbook("videos.xlsx", [
             ("视频总表", [[None, "BV号", "标题"], [None, "BV1Demo", "视频"]]),
@@ -520,7 +550,8 @@ class DataCheckCoreTests(unittest.TestCase):
         path = self.write_jsonl("report.jsonl", [comment_record(1), comment_record(1)])
         result = self.run_check([path])
         workbook = load_workbook(result["report"], read_only=True, data_only=True)
-        self.assertEqual(workbook.sheetnames, ["检查概览", "文件汇总", "问题明细"])
+        self.assertEqual(workbook.sheetnames,
+                         ["检查概览", "文件汇总", "问题明细", "数据质量", "字段说明"])
         overview = list(workbook["检查概览"].iter_rows(values_only=True))
         workbook.close()
         values = {row[0]: row[1] for row in overview[1:]}

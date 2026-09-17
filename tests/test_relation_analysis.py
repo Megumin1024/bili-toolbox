@@ -14,6 +14,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
+from core.xlsx import unix_seconds_to_excel_datetime
 from tools import TOOLS
 from tools.relation_analysis import core
 from tools.relation_analysis.core import (
@@ -52,13 +53,13 @@ class BaseTestCase(unittest.TestCase):
 class TimeParsingTests(BaseTestCase):
     def test_epoch_int_and_float(self):
         self.assertEqual(parse_time_value(1_700_000_000),
-                         datetime.fromtimestamp(1_700_000_000))
+                         unix_seconds_to_excel_datetime(1_700_000_000))
         self.assertEqual(parse_time_value(1_700_000_000.5),
-                         datetime.fromtimestamp(1_700_000_000.5))
+                         unix_seconds_to_excel_datetime(1_700_000_000.5))
 
     def test_epoch_numeric_string(self):
         self.assertEqual(parse_time_value(" 1700000000 "),
-                         datetime.fromtimestamp(1_700_000_000))
+                         unix_seconds_to_excel_datetime(1_700_000_000))
 
     def test_date_and_datetime_strings(self):
         self.assertEqual(parse_time_value("2024-05-01"), datetime(2024, 5, 1))
@@ -90,7 +91,7 @@ class CsvParsingTests(BaseTestCase):
         self.assertEqual(roster.rows[0]["mid"], 1001)
         self.assertEqual(roster.rows[0]["name"], "张三")
         self.assertEqual(roster.rows[0]["time"],
-                         datetime.fromtimestamp(1_700_000_000))
+                         unix_seconds_to_excel_datetime(1_700_000_000))
         self.assertEqual(roster.rows[1]["time"], datetime(2024, 5, 1, 8, 0, 0))
         self.assertTrue(roster.has_time)
 
@@ -196,7 +197,7 @@ class JsonParsingTests(BaseTestCase):
         ])
         self.assertEqual(len(roster.rows), 2)
         self.assertEqual(roster.rows[0]["time"],
-                         datetime.fromtimestamp(1_700_000_000))
+                         unix_seconds_to_excel_datetime(1_700_000_000))
         self.assertEqual(roster.rows[1]["time"], datetime(2024, 5, 1))
         self.assertTrue(roster.has_time)
 
@@ -244,6 +245,50 @@ class JsonParsingTests(BaseTestCase):
     def test_float_mid_kept_as_int(self):
         roster = self.load([{"mid": 1001.0, "uname": "张三"}])
         self.assertEqual(roster.rows[0]["mid"], 1001)
+
+    def test_decimal_text_mid_keeps_all_digits(self):
+        roster = self.load([{
+            "mid": "12345678901234567890.0", "uname": "长ID"
+        }])
+        self.assertEqual(roster.rows[0]["mid"], 12345678901234567890)
+
+    def test_mid_text_digit_boundary_is_bounded_before_int(self):
+        max_digits = core._MAX_MID_DIGITS
+        self.assertEqual(core._to_mid("9" * max_digits), int("9" * max_digits))
+        self.assertIsNone(core._to_mid("9" * (max_digits + 1)))
+        self.assertIsNone(core._to_mid("0" * 5000 + "1"))
+        self.assertIsNone(core._to_mid("9" * 5000))
+
+    def test_mid_text_rejects_exponents_and_unsafe_floats(self):
+        self.assertIsNone(core._to_mid("1e5000"))
+        self.assertIsNone(core._to_mid(float(2 ** 53 + 2)))
+        self.assertIsNone(core._to_mid(float("nan")))
+        self.assertIsNone(core._to_mid(float("inf")))
+        roster = self.load([
+            {"mid": "12345678901234567890.0", "uname": "保留"},
+            {"mid": "9" * 5000, "uname": "坏行"},
+            {"mid": "1e5000", "uname": "坏指数"},
+        ])
+        self.assertEqual([row["mid"] for row in roster.rows],
+                         [12345678901234567890])
+        self.assertEqual(roster.bad_rows, 2)
+
+    def test_ieee754_float_boundary_and_rounded_json_mid_are_rejected(self):
+        self.assertEqual(core._to_mid(float(2 ** 53 - 1)), 2 ** 53 - 1)
+        self.assertIsNone(core._to_mid(float(2 ** 53)))
+
+        parsed = json.loads('{"mid":9007199254740993.0}')
+        self.assertEqual(parsed["mid"], float(2 ** 53))
+        self.assertIsNone(core._to_mid(parsed["mid"]))
+
+        path = self.write_file(
+            "ieee754.json",
+            '[{"mid":9007199254740993.0,"uname":"精度丢失"},'
+            '{"mid":1001,"uname":"合法后续"}]',
+        )
+        roster = load_roster(path, "时点 1 · 粉丝清单")
+        self.assertEqual(roster.bad_rows, 1)
+        self.assertEqual([row["mid"] for row in roster.rows], [1001])
 
     def test_dedup_and_bad_count(self):
         roster = self.load([
@@ -439,12 +484,12 @@ class PipelineTests(BaseTestCase):
         self.assertTrue(stats["monthly"])
         self.assertTrue(Path(result["excel"]).is_file())
 
-        wb = load_workbook(result["excel"], read_only=True)
+        wb = load_workbook(result["excel"], read_only=False, data_only=False)
         self.addCleanup(wb.close)
         self.assertEqual(
             wb.sheetnames,
             ["汇总", "粉丝清单", "关注清单", "互相关注", "仅粉丝", "仅关注",
-             "粉丝差异", "按月新增分布"])
+             "粉丝差异", "按月新增分布", "数据质量", "字段说明"])
         # 粉丝差异表：状态列在前，新增/取关分组，mid 升序；时点 1 独有的
         # 1004 同样计入取关（时点 2 粉丝相对时点 1 粉丝）
         diff_ws = wb["粉丝差异"]
@@ -452,9 +497,9 @@ class PipelineTests(BaseTestCase):
             min_col=2, max_col=5, values_only=True)][3:]
         data = [row for row in rows if row[0] in ("新增", "取关")]
         self.assertEqual(data, [
-            ("新增", 1005, "新增戊", "2024-02-15 00:00:00"),
-            ("取关", 1002, "取关乙", "2024-01-20 00:00:00"),
-            ("取关", 1004, "仅粉丝丁", "—"),
+            ("新增", "1005", "新增戊", datetime(2024, 2, 15)),
+            ("取关", "1002", "取关乙", datetime(2024, 1, 20)),
+            ("取关", "1004", "仅粉丝丁", "—"),
         ])
         # 汇总：来源声明必须落在表内
         summary_ws = wb["汇总"]
@@ -465,11 +510,22 @@ class PipelineTests(BaseTestCase):
         fans_ws = wb["粉丝清单"]
         fan_rows = [row for row in fans_ws.iter_rows(
             min_col=2, max_col=4, values_only=True)][3:]
-        fan_data = [row for row in fan_rows if isinstance(row[0], int)]
-        self.assertEqual([row[0] for row in fan_data], [1001, 1002, 1004])
+        fan_data = [row for row in fan_rows
+                    if isinstance(row[0], str) and row[0].isdigit()]
+        self.assertEqual([row[0] for row in fan_data], ["1001", "1002", "1004"])
         for row in fan_data:
             self.assertTrue(str(row[1]).strip())
             self.assertTrue(str(row[2]).strip())
+        first_fan = next(row for row in fans_ws.iter_rows(
+            min_row=4, max_row=4, min_col=2, max_col=4))
+        self.assertEqual(first_fan[0].data_type, "s")
+        self.assertEqual(first_fan[0].number_format, "@")
+        self.assertIsInstance(first_fan[2].value, datetime)
+        self.assertEqual(first_fan[2].number_format, "yyyy-mm-dd hh:mm:ss")
+        summary_count = next(row[1] for row in summary_ws.iter_rows(min_col=2, max_col=3)
+                             if row[0].value == "互相关注")
+        self.assertIsInstance(summary_count.value, int)
+        self.assertEqual(summary_count.number_format, "#,##0")
         wb.close()
 
     def test_single_timepoint_degrades(self):
@@ -478,7 +534,7 @@ class PipelineTests(BaseTestCase):
         wb = load_workbook(result["excel"], read_only=True)
         self.addCleanup(wb.close)
         # 时点 1 粉丝清单带时间列 → 按月分布照常输出；无差异/集合表
-        self.assertEqual(wb.sheetnames, ["汇总", "粉丝清单", "按月新增分布"])
+        self.assertEqual(wb.sheetnames, ["汇总", "粉丝清单", "按月新增分布", "数据质量", "字段说明"])
         stats = result["stats"]
         self.assertIsNone(stats["mutual"])
         self.assertIsNone(stats["added"])

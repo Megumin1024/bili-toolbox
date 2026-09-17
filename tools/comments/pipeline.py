@@ -13,7 +13,9 @@ stopped_reason="budget_reached"，断点保留，重跑从断点续传。链接�
 暴露 budget 参数，故不记账——预算管住的是高速率的 gRPC 评论通道。
 """
 import json
+import math
 import os
+import re
 from pathlib import Path
 
 from core import links, risk, session
@@ -22,6 +24,37 @@ from core.risk import RiskChallengeError
 from core.session import http_get_json  # noqa: F401  兼容旧引用
 
 from . import core
+
+
+_MAX_RPID_DIGITS = 20
+_MAX_RPID_VALUE = 10 ** _MAX_RPID_DIGITS - 1
+_RPID_TEXT_RE = re.compile(r"^\+?[0-9]+$")
+
+
+def _parse_json_int(text):
+    """让超长 JSON 整数进入 rpid 格式校验，而不是提前变成解析失败。"""
+    return text if len(text.lstrip("+-")) > _MAX_RPID_DIGITS else int(text)
+
+
+def _normalize_rpid(raw):
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw if 0 <= raw <= _MAX_RPID_VALUE else None
+    if isinstance(raw, str):
+        if len(raw) > _MAX_RPID_DIGITS or not _RPID_TEXT_RE.fullmatch(raw):
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return value if 0 <= value <= _MAX_RPID_VALUE else None
+    if isinstance(raw, float):
+        if not math.isfinite(raw) or not raw.is_integer() or abs(raw) >= 2 ** 53:
+            return None
+        value = int(raw)
+        return value if 0 <= value <= _MAX_RPID_VALUE else None
+    return None
 
 
 def _raise_on_crawl_error(stats):
@@ -97,15 +130,55 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
     _raise_on_crawl_error(stats)
     rows = []
     seen = set()
+    jsonl_candidate_records = 0
+    jsonl_parse_failures = 0
+    jsonl_duplicate_rows = 0
+    jsonl_missing_rpid = 0
+    jsonl_invalid_rpid = 0
     with open(crawler.out_path, encoding="utf-8") as fh:
         for line in fh:
-            try:
-                r = json.loads(line)
-                if r.get("rpid") not in seen:
-                    seen.add(r["rpid"])
-                    rows.append(r)
-            except ValueError:
+            if not line.strip():
                 continue
+            jsonl_candidate_records += 1
+            try:
+                r = json.loads(line, parse_int=_parse_json_int)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                jsonl_parse_failures += 1
+                continue
+            if not isinstance(r, dict):
+                jsonl_missing_rpid += 1
+                continue
+            if "rpid" not in r or r["rpid"] in (None, ""):
+                jsonl_missing_rpid += 1
+                continue
+            raw_rpid = r["rpid"]
+            normalized_rpid = _normalize_rpid(raw_rpid)
+            if normalized_rpid is None:
+                jsonl_invalid_rpid += 1
+                continue
+            if normalized_rpid in seen:
+                jsonl_duplicate_rows += 1
+                continue
+            seen.add(normalized_rpid)
+            normalized_row = dict(r)
+            normalized_row["rpid"] = normalized_rpid
+            rows.append(normalized_row)
+    stats = dict(stats)
+    stats.update({
+        "jsonl_candidate_records": jsonl_candidate_records,
+        "jsonl_parse_failures": jsonl_parse_failures,
+        "jsonl_duplicate_rows": jsonl_duplicate_rows,
+        "jsonl_missing_rpid": jsonl_missing_rpid,
+        "jsonl_invalid_rpid": jsonl_invalid_rpid,
+        "jsonl_remaining_rpid_conflicts": 0,
+    })
+    meta = dict(meta)
+    meta.update({
+        "target_type": kind,
+        "normalized_oid": str(oid),
+        "max_pages": max_pages,
+        "use_tls_grpc": bool(use_tls_grpc),
+    })
     p(text=f"抓取完成: 共 {len(rows):,} 条（抓取请求 {stats['pages']} 页"
            f"{'，已取消/限页' if stats.get('aborted') else ''}"
            f"{'，已达上限安全停止' if stats.get('stopped_reason') == 'budget_reached' else ''}）"
@@ -117,7 +190,8 @@ def run_pipeline(url, out_dir, sleep=0.2, max_pages=0, use_tls_grpc=False,
 
     p(text="正在生成 Excel…")
     xlsx_path = Path(out_path) / f"评论分析_{oid}.xlsx"
-    core.export_xlsx(rows, meta, kpi, xlsx_path, progress=lambda **kw: p(**kw))
+    core.export_xlsx(rows, meta, kpi, xlsx_path, progress=lambda **kw: p(**kw),
+                     stats=stats)
     p(text=f"完成! Excel: {xlsx_path}")
     if open_result and os.name == "nt":
         try:

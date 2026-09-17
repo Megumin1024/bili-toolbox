@@ -21,6 +21,20 @@ from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Alignment, Font, PatternFill
 
 from core import diagnostics
+from core import xlsx as xlsx_mod
+from core.xlsx_metadata import (
+    FieldDefinition,
+    QualityItem,
+    make_metadata,
+    primary_key_quality,
+    write_metadata_sheets,
+)
+from core.xlsx_presentation import (
+    TableLayout,
+    append_sheet_directory,
+    configure_table,
+    finish_table,
+)
 
 from . import core as check_core
 
@@ -866,6 +880,7 @@ def _cell(ws, value, header=False):
 
 def _write_manifest(artifact, summaries, run, options, merged_outputs, cancel):
     wb = Workbook(write_only=True)
+    writer = xlsx_mod.SheetWriter(wb)
     try:
         overview = wb.create_sheet("修复概览")
         overview.append([_cell(overview, v, True) for v in ("指标", "数值", "说明")])
@@ -887,11 +902,19 @@ def _write_manifest(artifact, summaries, run, options, merged_outputs, cancel):
         )
         for row in rows:
             overview.append([_cell(overview, v) for v in row])
+        append_sheet_directory(writer, overview, (
+            ("文件汇总", "文件汇总"),
+            ("修复明细", "修复明细"),
+            ("数据质量", "数据质量"),
+            ("字段说明", "字段说明"),
+        ), prefix_columns=0)
 
         files_ws = wb.create_sheet("文件汇总")
         headers = ("源文件名", "文件类型", "识别结构", "状态", "SHA-256", "大小", "mtime_ns",
                    "结束时源文件未变化", "输出文件名", "原始记录", "输出记录", "空白清理",
                    "重复清理", "缺失字段补齐", "未自动修复", "跳过原因")
+        files_layout = TableLayout(1, 1, len(headers))
+        configure_table(files_ws, files_layout)
         files_ws.append([_cell(files_ws, v, True) for v in headers])
         for summary in summaries:
             fp = summary.fingerprint
@@ -899,16 +922,68 @@ def _write_manifest(artifact, summaries, run, options, merged_outputs, cancel):
                       fp.get("sha256", ""), fp.get("size", 0), fp.get("mtime_ns", 0),
                       "是" if summary.unchanged else "否", Path(summary.output).name if summary.output else "",
                       summary.original_records, summary.output_records, summary.blanks_removed,
-                      summary.duplicates_removed, summary.missing_filled, summary.unfixed,
-                      summary.skipped_reason)
+                       summary.duplicates_removed, summary.missing_filled, summary.unfixed,
+                       summary.skipped_reason)
             files_ws.append([_cell(files_ws, v) for v in values])
+        finish_table(files_ws, files_layout, len(summaries))
 
         details_ws = wb.create_sheet("修复明细")
+        details_layout = TableLayout(1, 1, 6)
+        configure_table(details_ws, details_layout)
         details_ws.append([_cell(details_ws, v, True) for v in
                            ("源文件", "行号/工作表", "操作", "字段", "安全键", "原因")])
         for detail in run.details:
             _cancelled(cancel)
             details_ws.append([_cell(details_ws, v) for v in detail.row()])
+        finish_table(details_ws, details_layout, len(run.details))
+        quality = [
+            QualityItem("修复", "输入文件数", xlsx_mod.checked_cell_value(len(summaries), xlsx_mod.CellKind.INTEGER), "个", "本次修复清单输入"),
+            QualityItem("修复", "已处理文件数", xlsx_mod.checked_cell_value(sum(s.status == "已处理" for s in summaries), xlsx_mod.CellKind.INTEGER), "个", "成功生成修复副本的文件"),
+            QualityItem("修复", "跳过文件数", xlsx_mod.checked_cell_value(sum(s.status == "已跳过" for s in summaries), xlsx_mod.CellKind.INTEGER), "个", "损坏或复杂未知文件"),
+            QualityItem("修复", "原始记录数", xlsx_mod.checked_cell_value(sum(s.original_records for s in summaries), xlsx_mod.CellKind.INTEGER), "条", "可解析输入记录"),
+            QualityItem("修复", "输出记录数", xlsx_mod.checked_cell_value(sum(s.output_records for s in summaries), xlsx_mod.CellKind.INTEGER), "条", "修复副本记录合计"),
+            QualityItem("修复", "删除重复记录", xlsx_mod.checked_cell_value(sum(s.duplicates_removed for s in summaries), xlsx_mod.CellKind.INTEGER), "条", "保留首次记录"),
+            QualityItem("修复", "补齐缺失字段", xlsx_mod.checked_cell_value(sum(s.missing_filled for s in summaries), xlsx_mod.CellKind.INTEGER), "条", "null 或空白字段"),
+            QualityItem("修复", "未自动修复", xlsx_mod.checked_cell_value(sum(s.unfixed for s in summaries), xlsx_mod.CellKind.INTEGER), "条", "异常值或语法错误"),
+            QualityItem("修复", "明细是否截断", xlsx_mod.checked_cell_value(run.detail_total > run.details_limit, xlsx_mod.CellKind.BOOLEAN), "状态", "展示上限不影响统计总数"),
+        ]
+        quality.extend(primary_key_quality(
+            "主键", "结构化主键", denominator=None, missing=None, invalid=None,
+            duplicates=None, dedup_discarded=None, remaining_conflicts=None,
+            source_note="修复清单不承诺统一业务主键；不从修复副本扫描猜测",
+        ))
+        fields = []
+        stable_names = {
+            "指标": "metric", "数值": "value", "说明": "note",
+            "源文件名": "file", "文件类型": "file_type", "识别结构": "structure",
+            "状态": "status", "SHA-256": "sha256", "大小": "size", "mtime_ns": "mtime_ns",
+            "结束时源文件未变化": "source_unchanged", "输出文件名": "output_file",
+            "原始记录": "original_records", "输出记录": "output_records",
+            "空白清理": "blanks_removed", "重复清理": "duplicates_removed",
+            "缺失字段补齐": "missing_filled", "未自动修复": "unfixed", "跳过原因": "skipped_reason",
+            "源文件": "source_file", "行号/工作表": "location", "操作": "operation",
+            "字段": "field", "安全键": "safe_key", "原因": "reason",
+        }
+        integer_headers = {"大小", "mtime_ns", "原始记录", "输出记录", "空白清理", "重复清理", "缺失字段补齐", "未自动修复"}
+        for sheet, headers in (
+            ("修复概览", ("指标", "数值", "说明")),
+            ("文件汇总", ("源文件名", "文件类型", "识别结构", "状态", "SHA-256", "大小", "mtime_ns", "结束时源文件未变化", "输出文件名", "原始记录", "输出记录", "空白清理", "重复清理", "缺失字段补齐", "未自动修复", "跳过原因")),
+            ("修复明细", ("源文件", "行号/工作表", "操作", "字段", "安全键", "原因")),
+        ):
+            for header in headers:
+                fields.append(FieldDefinition(sheet, header, stable_names[header],
+                                              "整数" if header in integer_headers else
+                                              "文本/数值" if header == "数值" else "文本", "", "是", "本地修复统计", "结构化修复结果",
+                                              xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "缺失或不适用"))
+        metadata = make_metadata(
+            tool="数据修复", report_type="数据修复清单",
+            parameters={
+                "输入文件数量": xlsx_mod.cell_value(len(summaries), xlsx_mod.CellKind.INTEGER),
+                "已处理文件数量": xlsx_mod.cell_value(sum(s.status == "已处理" for s in summaries), xlsx_mod.CellKind.INTEGER),
+                "是否合并": xlsx_mod.cell_value(bool(merged_outputs), xlsx_mod.CellKind.BOOLEAN),
+            }, parameter_allowlist=("输入文件数量", "已处理文件数量", "是否合并"),
+            quality_items=quality, fields=fields)
+        write_metadata_sheets(wb, metadata)
         wb.save(artifact.temp)
     finally:
         wb.close()

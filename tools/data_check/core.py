@@ -23,6 +23,23 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils.exceptions import InvalidFileException
 
 from core import diagnostics
+from core import xlsx as xlsx_mod
+from core.xlsx_metadata import (
+    FIELDS_SHEET,
+    FieldDefinition,
+    QualityItem,
+    QUALITY_SHEET,
+    is_complete_metadata_workbook,
+    make_metadata,
+    primary_key_quality,
+    write_metadata_sheets,
+)
+from core.xlsx_presentation import (
+    TableLayout,
+    append_sheet_directory,
+    configure_table,
+    finish_table,
+)
 
 
 MAX_ISSUE_DETAILS = 10_000
@@ -574,6 +591,15 @@ def _check_excel(path: Path, accumulator: _Accumulator, progress: Progress,
             _issue(summary, accumulator, location="工作簿", category="空工作簿",
                    field="工作表", message="工作簿没有可读取的工作表。")
             return summary
+        metadata_rows = {
+            name: tuple(
+                tuple(row)
+                for row in workbook[name].iter_rows(max_row=40, values_only=True)
+            )
+            for name in (QUALITY_SHEET, FIELDS_SHEET)
+            if name in sheetnames
+        }
+        complete_metadata = is_complete_metadata_workbook(metadata_rows)
         selected_sheet, kind = _find_known_excel_sheet(sheetnames)
         summary.structure = kind
         if selected_sheet is not None:
@@ -583,6 +609,8 @@ def _check_excel(path: Path, accumulator: _Accumulator, progress: Progress,
             for sheet_name in sheetnames:
                 if cancel():
                     raise CheckCancelled
+                if complete_metadata and sheet_name in (QUALITY_SHEET, FIELDS_SHEET):
+                    continue
                 _check_unknown_excel_sheet(
                     workbook[sheet_name], summary, accumulator, progress, cancel
                 )
@@ -689,6 +717,7 @@ def _write_report(path: Path, files: list[FileSummary], issues: list[Issue],
                   stats: dict[str, object], cancel: Cancel) -> None:
     workbook = Workbook(write_only=True)
     workbook.properties.creator = "BiliToolbox"
+    writer = xlsx_mod.SheetWriter(workbook)
     temp_path = path.with_suffix(path.suffix + ".tmp")
     try:
         overview = workbook.create_sheet("检查概览")
@@ -711,12 +740,20 @@ def _write_report(path: Path, files: list[FileSummary], issues: list[Issue],
             )
         for row in overview_rows:
             overview.append([_cell(overview, value) for value in row])
+        append_sheet_directory(writer, overview, (
+            ("文件汇总", "文件汇总"),
+            ("问题明细", "问题明细"),
+            ("数据质量", "数据质量"),
+            ("字段说明", "字段说明"),
+        ), prefix_columns=0)
 
         summary_sheet = workbook.create_sheet("文件汇总")
         summary_headers = (
             "输入文件名", "文件类型", "识别出的数据结构", "记录数", "重复", "缺失字段",
             "异常格式", "空白内容", "文件损坏", "检查结论",
         )
+        summary_layout = TableLayout(1, 1, len(summary_headers))
+        configure_table(summary_sheet, summary_layout)
         summary_sheet.append([_cell(summary_sheet, value, header=True) for value in summary_headers])
         for item in files:
             row = item.as_dict()
@@ -724,10 +761,13 @@ def _write_report(path: Path, files: list[FileSummary], issues: list[Issue],
                 "file", "file_type", "structure", "records", "duplicates", "missing",
                 "formats", "blanks", "damaged", "conclusion",
             )])
+        finish_table(summary_sheet, summary_layout, len(files))
 
         details = workbook.create_sheet("问题明细")
         detail_headers = ("文件", "工作表或 JSONL 行号", "问题类别", "字段",
-                          "安全的问题说明", "重复键/定位")
+                           "安全的问题说明", "重复键/定位")
+        detail_layout = TableLayout(1, 1, len(detail_headers))
+        configure_table(details, detail_layout)
         details.append([_cell(details, value, header=True) for value in detail_headers])
         for item in issues:
             if cancel():
@@ -735,6 +775,53 @@ def _write_report(path: Path, files: list[FileSummary], issues: list[Issue],
             details.append([_cell(details, value) for value in (
                 item.file, item.location, item.category, item.field, item.message, item.key,
             )])
+        finish_table(details, detail_layout, len(issues))
+        quality = [
+            QualityItem("检查", "文件数量", xlsx_mod.checked_cell_value(stats["file_count"], xlsx_mod.CellKind.INTEGER), "个", "本次选择的本地文件"),
+            QualityItem("检查", "有效记录数", xlsx_mod.checked_cell_value(stats["record_count"], xlsx_mod.CellKind.INTEGER), "条", "已读取的 JSON 对象或 Excel 数据行"),
+            QualityItem("检查", "重复数量", xlsx_mod.checked_cell_value(stats["duplicates"], xlsx_mod.CellKind.INTEGER), "条", "现有检查器统计"),
+            QualityItem("检查", "缺失字段数量", xlsx_mod.checked_cell_value(stats["missing"], xlsx_mod.CellKind.INTEGER), "条", "现有检查器统计"),
+            QualityItem("检查", "异常格式数量", xlsx_mod.checked_cell_value(stats["formats"], xlsx_mod.CellKind.INTEGER), "条", "现有检查器统计"),
+            QualityItem("检查", "空白内容数量", xlsx_mod.checked_cell_value(stats["blanks"], xlsx_mod.CellKind.INTEGER), "条", "现有检查器统计"),
+            QualityItem("检查", "问题明细总数", xlsx_mod.checked_cell_value(stats["total_issues"], xlsx_mod.CellKind.INTEGER), "条", "统计完整，展示可能截断"),
+            QualityItem("检查", "问题明细是否截断", xlsx_mod.checked_cell_value(bool(stats.get("details_truncated")), xlsx_mod.CellKind.BOOLEAN), "状态", "来自结构化检查统计"),
+            QualityItem("检查", "是否取消", xlsx_mod.checked_cell_value(bool(stats.get("cancelled", False)), xlsx_mod.CellKind.BOOLEAN), "状态", "来自结构化检查状态"),
+        ]
+        quality.extend(primary_key_quality(
+            "主键", "结构化主键", denominator=None, missing=None, invalid=None,
+            duplicates=None, dedup_discarded=None, remaining_conflicts=None,
+            source_note="当前检查报告不承诺统一业务主键；不从问题明细表猜测",
+        ))
+        fields = []
+        stable_names = {
+            "指标": "metric", "数值": "value", "说明": "note",
+            "输入文件名": "file", "文件类型": "file_type", "识别出的数据结构": "structure",
+            "记录数": "records", "重复": "duplicates", "缺失字段": "missing_fields",
+            "异常格式": "format_errors", "空白内容": "blank_contents", "文件损坏": "damaged",
+            "检查结论": "conclusion", "文件": "file", "工作表或 JSONL 行号": "location",
+            "问题类别": "category", "字段": "field", "安全的问题说明": "message",
+            "重复键/定位": "key",
+        }
+        integer_headers = {"记录数", "重复", "缺失字段", "异常格式", "空白内容", "文件损坏"}
+        for sheet, headers in (
+            ("检查概览", ("指标", "数值", "说明")),
+            ("文件汇总", ("输入文件名", "文件类型", "识别出的数据结构", "记录数", "重复", "缺失字段", "异常格式", "空白内容", "文件损坏", "检查结论")),
+            ("问题明细", ("文件", "工作表或 JSONL 行号", "问题类别", "字段", "安全的问题说明", "重复键/定位")),
+        ):
+            for header in headers:
+                fields.append(FieldDefinition(sheet, header, stable_names[header],
+                                              "整数" if header in integer_headers else
+                                              "文本/数值" if header == "数值" else "文本", "", "是", "本地检查统计", "结构化检查结果",
+                                              xlsx_mod.cell_value(None, xlsx_mod.CellKind.NOT_APPLICABLE), "缺失或不适用"))
+        metadata = make_metadata(
+            tool="数据检查", report_type="数据检查报告",
+            parameters={
+                "文件数量": xlsx_mod.cell_value(stats["file_count"], xlsx_mod.CellKind.INTEGER),
+                "可读取文件数量": xlsx_mod.cell_value(stats["readable_files"], xlsx_mod.CellKind.INTEGER),
+                "输出类型": xlsx_mod.cell_value("本地 Excel 检查报告", xlsx_mod.CellKind.TEXT),
+            }, parameter_allowlist=("文件数量", "可读取文件数量", "输出类型"),
+            quality_items=quality, fields=fields)
+        write_metadata_sheets(workbook, metadata)
         workbook.save(str(temp_path))
     finally:
         try:

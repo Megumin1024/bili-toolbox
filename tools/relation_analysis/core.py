@@ -14,9 +14,13 @@
 import csv
 import io
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+
+from core import xlsx as xlsx_mod
 
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_ROWS = 1_000_000
@@ -29,6 +33,11 @@ TIME_KEYS = ("mtime", "ptime", "ctime", "follow_time", "关注时间")
 
 DASH = "—"
 _TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+_MID_INTEGER_RE = re.compile(r"^[+-]?[0-9]+$")
+_MID_ZERO_DECIMAL_RE = re.compile(r"^[+-]?[0-9]+\.0+$")
+_MAX_MID_DIGITS = xlsx_mod.MAX_ID_DIGITS
+_MAX_MID_TEXT_LENGTH = xlsx_mod.MAX_ID_TEXT_LENGTH
+_MAX_SAFE_FLOAT_INTEGER = 1 << 53
 
 
 class Cancelled(Exception):
@@ -52,26 +61,38 @@ def _to_mid(value):
     if value is None or isinstance(value, bool):
         return None
     if isinstance(value, int):
-        return value
+        return value if abs(value) < 10 ** _MAX_MID_DIGITS else None
     if isinstance(value, float):
-        return int(value) if value.is_integer() else None
-    text = str(value).strip()
+        if (not math.isfinite(value) or not value.is_integer()
+                or abs(value) >= _MAX_SAFE_FLOAT_INTEGER):
+            return None
+        return int(value)
+    raw_text = str(value)
+    if len(raw_text) > _MAX_MID_TEXT_LENGTH:
+        return None
+    text = raw_text.strip()
     if not text:
         return None
+    if _MID_INTEGER_RE.fullmatch(text):
+        integer_text = text
+    elif _MID_ZERO_DECIMAL_RE.fullmatch(text):
+        integer_text = text.split(".", 1)[0]
+    else:
+        return None
+    digits = integer_text.lstrip("+-")
+    if len(digits) > _MAX_MID_DIGITS:
+        return None
     try:
-        return int(text)
-    except ValueError:
-        try:
-            number = float(text)
-        except ValueError:
-            return None
-        return int(number) if number.is_integer() else None
+        parsed = int(integer_text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return parsed if abs(parsed) < 10 ** _MAX_MID_DIGITS else None
 
 
 def _from_epoch(value):
     try:
-        return datetime.fromtimestamp(value)
-    except (OSError, OverflowError, ValueError):
+        return xlsx_mod.unix_seconds_to_excel_datetime(value)
+    except (TypeError, OSError, OverflowError, ValueError):
         return None
 
 
@@ -84,14 +105,13 @@ def parse_time_value(value):
     text = str(value).strip()
     if not text:
         return None
-    try:
-        return _from_epoch(float(text))
-    except ValueError:
-        pass
+    parsed_epoch = _from_epoch(text)
+    if parsed_epoch is not None:
+        return parsed_epoch
     for fmt in _TIME_FORMATS:
         try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
+            return xlsx_mod.local_text_to_excel_datetime(text, fmt)
+        except (TypeError, ValueError):
             continue
     return None
 
